@@ -1,12 +1,22 @@
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import OpenSearchException as OpenSearchLibraryError
+from opensearchpy.helpers import bulk
 from src.exceptions import ChunkIndexError
 from src.services.opensearch.index_config import CHUNK_FIELD_TYPES, build_arxiv_chunks_mapping
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BulkWriteResult:
+    attempted: int
+    indexed: int
+    failed: int
+    errors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
 class ChunkIndexManager:
@@ -59,6 +69,60 @@ class ChunkIndexManager:
             }
         except (OpenSearchLibraryError, KeyError, TypeError, ValueError) as exc:
             raise ChunkIndexError(f"Could not read chunk index stats for {self.index_name!r}: {exc}") from exc
+
+    def ensure_compatible_index(self) -> None:
+        if not self.chunk_index_exists():
+            raise ChunkIndexError(f"Chunk index {self.index_name!r} does not exist")
+        self.validate_chunk_index_mapping(self.get_chunk_index_mapping())
+
+    def delete_paper_chunks(self, arxiv_id: str) -> int:
+        """Delete only chunks belonging to one exact arXiv ID."""
+        try:
+            response = self._client.delete_by_query(
+                index=self.index_name,
+                body={"query": {"term": {"arxiv_id": arxiv_id}}},
+                conflicts="proceed",
+                refresh=True,
+            )
+            return int(response.get("deleted", 0))
+        except (OpenSearchLibraryError, TypeError, ValueError) as exc:
+            raise ChunkIndexError(f"Could not delete chunks for paper {arxiv_id!r}: {exc}") from exc
+
+    def bulk_index_documents(self, documents: list[tuple[str, dict[str, Any]]]) -> BulkWriteResult:
+        """Bulk-index chunk documents using their deterministic IDs."""
+        if not documents:
+            return BulkWriteResult(attempted=0, indexed=0, failed=0)
+        actions = [
+            {
+                "_op_type": "index",
+                "_index": self.index_name,
+                "_id": document_id,
+                "_source": document,
+            }
+            for document_id, document in documents
+        ]
+        try:
+            indexed, errors = bulk(
+                self._client,
+                actions,
+                raise_on_error=False,
+                raise_on_exception=False,
+            )
+        except OpenSearchLibraryError as exc:
+            raise ChunkIndexError(f"Could not bulk-index chunks into {self.index_name!r}: {exc}") from exc
+        error_items = tuple(errors)
+        return BulkWriteResult(
+            attempted=len(actions),
+            indexed=int(indexed),
+            failed=len(actions) - int(indexed),
+            errors=error_items,
+        )
+
+    def refresh_chunk_index(self) -> None:
+        try:
+            self._client.indices.refresh(index=self.index_name)
+        except OpenSearchLibraryError as exc:
+            raise ChunkIndexError(f"Could not refresh chunk index {self.index_name!r}: {exc}") from exc
 
     def validate_chunk_index_mapping(self, mapping: dict[str, Any]) -> None:
         """Reject an existing index whose core fields or vector dimension are incompatible."""
