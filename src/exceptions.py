@@ -35,3 +35,7 @@ class LLMException(Exception):
 # General application exceptions
 class ConfigurationError(Exception):
     """Exception raised when configuration is invalid."""
+
+
+class ArxivClientError(Exception):
+    """Exception raised when an arXiv API request or response cannot be handled."""
