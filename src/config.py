@@ -25,7 +25,8 @@ class Settings(DefaultSettings):
     postgres_max_overflow: int = 0
 
     # OpenSearch configuration
-    opensearch_host: str = "http://localhost:9200"
+    opensearch_host: str = "http://opensearch:9200"
+    opensearch_index_name: str = "arxiv-papers"
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
