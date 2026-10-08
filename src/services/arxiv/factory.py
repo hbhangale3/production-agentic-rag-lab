@@ -12,4 +12,5 @@ def make_arxiv_client(settings: Settings | None = None) -> ArxivClient:
         rate_limit_delay=config.arxiv_rate_limit_delay,
         timeout=config.arxiv_timeout,
         max_retries=config.arxiv_max_retries,
+        pdf_cache_dir=config.arxiv_pdf_cache_dir,
     )

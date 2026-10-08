@@ -34,6 +34,7 @@ class Settings(DefaultSettings):
     arxiv_rate_limit_delay: float = 3.0
     arxiv_timeout: float = 30.0
     arxiv_max_retries: int = 3
+    arxiv_pdf_cache_dir: str = "data/arxiv_pdfs"
 
 
 def get_settings() -> Settings:

@@ -6,10 +6,11 @@ import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from datetime import time as datetime_time
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Literal
 
 import httpx
-from src.exceptions import ArxivClientError
+from src.exceptions import ArxivClientError, ArxivPDFDownloadError
 from src.schemas.arxiv import ArxivPaper
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ ARXIV_NAMESPACE = "http://arxiv.org/schemas/atom"
 NAMESPACES = {"atom": ATOM_NAMESPACE, "arxiv": ARXIV_NAMESPACE}
 TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$")
+UNSAFE_FILENAME_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]+")
+PDF_SIGNATURE = b"%PDF-"
 
 
 class ArxivClient:
@@ -35,6 +38,7 @@ class ArxivClient:
         rate_limit_delay: float = 3.0,
         timeout: float = 30.0,
         max_retries: int = 3,
+        pdf_cache_dir: str | Path = "data/arxiv_pdfs",
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if max_results < 1:
@@ -49,6 +53,7 @@ class ArxivClient:
         self.max_results = max_results
         self.rate_limit_delay = rate_limit_delay
         self.max_retries = max_retries
+        self.pdf_cache_dir = Path(pdf_cache_dir)
         self._client = http_client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = http_client is None
         self._rate_limit_lock = asyncio.Lock()
@@ -95,6 +100,41 @@ class ArxivClient:
         }
         response = await self._request(params)
         return self.parse_response(response.text)
+
+    async def download_pdf(self, paper: ArxivPaper) -> Path:
+        """Download and atomically cache a paper PDF, or reuse a valid cached copy."""
+        target_path = self.pdf_cache_dir / self.pdf_filename(paper.arxiv_id)
+        partial_path = target_path.with_suffix(".pdf.part")
+
+        try:
+            self.pdf_cache_dir.mkdir(parents=True, exist_ok=True)
+            if self._is_valid_cached_pdf(target_path):
+                logger.info("Using cached arXiv PDF: %s", target_path)
+                return target_path
+
+            if target_path.exists():
+                logger.warning("Removing invalid cached arXiv PDF: %s", target_path)
+                target_path.unlink()
+
+            partial_path.unlink(missing_ok=True)
+            await self._download_pdf_with_retries(str(paper.pdf_url), partial_path)
+            partial_path.replace(target_path)
+            logger.info("Cached arXiv PDF at %s", target_path)
+            return target_path
+        except ArxivPDFDownloadError:
+            partial_path.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            partial_path.unlink(missing_ok=True)
+            raise ArxivPDFDownloadError(f"Could not cache arXiv PDF {paper.arxiv_id}: {exc}") from exc
+
+    @staticmethod
+    def pdf_filename(arxiv_id: str) -> str:
+        """Return a deterministic filesystem-safe filename for an arXiv ID."""
+        safe_id = UNSAFE_FILENAME_CHARACTERS.sub("_", arxiv_id.strip()).strip("._-")
+        if not safe_id:
+            raise ArxivPDFDownloadError("Cannot create a PDF filename from an empty arXiv ID")
+        return f"{safe_id}.pdf"
 
     @classmethod
     def build_search_query(
@@ -149,6 +189,77 @@ class ArxivClient:
             await asyncio.sleep(retry_delay)
 
         raise AssertionError("unreachable")
+
+    async def _download_pdf_with_retries(self, url: str, partial_path: Path) -> None:
+        attempts = self.max_retries + 1
+        for attempt in range(attempts):
+            await self._respect_rate_limit()
+            response: httpx.Response | None = None
+            try:
+                logger.info("Downloading arXiv PDF (attempt %d/%d): %s", attempt + 1, attempts, url)
+                async with self._client.stream("GET", url) as response:
+                    if response.status_code in TRANSIENT_STATUS_CODES:
+                        error: Exception = httpx.HTTPStatusError(
+                            f"Transient arXiv PDF response: {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                    else:
+                        response.raise_for_status()
+                        await self._stream_pdf_to_file(response, partial_path)
+                        return
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                error = exc
+            except httpx.HTTPStatusError as exc:
+                partial_path.unlink(missing_ok=True)
+                raise ArxivPDFDownloadError(f"arXiv PDF request returned HTTP {exc.response.status_code}") from exc
+            except ArxivPDFDownloadError:
+                partial_path.unlink(missing_ok=True)
+                raise
+            except OSError as exc:
+                partial_path.unlink(missing_ok=True)
+                raise ArxivPDFDownloadError(f"Could not write arXiv PDF: {exc}") from exc
+
+            partial_path.unlink(missing_ok=True)
+            if attempt == attempts - 1:
+                raise ArxivPDFDownloadError(f"arXiv PDF download failed after {attempts} attempts") from error
+
+            retry_delay = self._retry_delay(response, attempt)
+            logger.warning("Transient arXiv PDF failure; retrying in %.1f seconds", retry_delay)
+            await asyncio.sleep(retry_delay)
+
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    async def _stream_pdf_to_file(response: httpx.Response, partial_path: Path) -> None:
+        signature = bytearray()
+        bytes_written = 0
+        with partial_path.open("wb") as pdf_file:
+            async for chunk in response.aiter_bytes():
+                if not chunk:
+                    continue
+                if len(signature) < len(PDF_SIGNATURE):
+                    needed = len(PDF_SIGNATURE) - len(signature)
+                    signature.extend(chunk[:needed])
+                pdf_file.write(chunk)
+                bytes_written += len(chunk)
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if bytes_written == 0:
+            raise ArxivPDFDownloadError("arXiv returned an empty PDF response")
+        if bytes(signature) != PDF_SIGNATURE:
+            detail = f" (Content-Type: {content_type})" if content_type else ""
+            raise ArxivPDFDownloadError(f"arXiv response is not a valid PDF{detail}")
+
+    @staticmethod
+    def _is_valid_cached_pdf(path: Path) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size < len(PDF_SIGNATURE):
+                return False
+            with path.open("rb") as pdf_file:
+                return pdf_file.read(len(PDF_SIGNATURE)) == PDF_SIGNATURE
+        except OSError:
+            return False
 
     async def _respect_rate_limit(self) -> None:
         async with self._rate_limit_lock:

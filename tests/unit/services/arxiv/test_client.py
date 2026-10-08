@@ -2,7 +2,8 @@ from datetime import date, datetime, timezone
 
 import httpx
 import pytest
-from src.exceptions import ArxivClientError
+from src.exceptions import ArxivClientError, ArxivPDFDownloadError
+from src.schemas.arxiv import ArxivPaper
 from src.services.arxiv.client import ArxivClient
 
 ARXIV_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -21,6 +22,19 @@ ARXIV_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
   </entry>
 </feed>
 """
+
+
+@pytest.fixture
+def paper() -> ArxivPaper:
+    return ArxivPaper(
+        arxiv_id="2412.12345",
+        title="A Paper About Agents",
+        authors=["Ada Lovelace"],
+        abstract="An abstract.",
+        categories=["cs.AI"],
+        published_date=datetime(2024, 12, 20, tzinfo=timezone.utc),
+        pdf_url="https://arxiv.org/pdf/2412.12345v2",
+    )
 
 
 @pytest.mark.anyio
@@ -135,3 +149,109 @@ def test_build_search_query_rejects_reversed_dates() -> None:
             from_date=date(2025, 2, 1),
             to_date=date(2025, 1, 1),
         )
+
+
+@pytest.mark.anyio
+async def test_download_pdf_creates_valid_cached_file(tmp_path, paper: ArxivPaper) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/pdf"},
+            content=b"%PDF-1.7\nmock pdf content",
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path,
+        http_client=http_client,
+    )
+    try:
+        pdf_path = await client.download_pdf(paper)
+    finally:
+        await http_client.aclose()
+
+    assert pdf_path == tmp_path / "2412.12345.pdf"
+    assert pdf_path.read_bytes() == b"%PDF-1.7\nmock pdf content"
+    assert not (tmp_path / "2412.12345.pdf.part").exists()
+
+
+@pytest.mark.anyio
+async def test_download_pdf_cache_hit_avoids_network(tmp_path, paper: ArxivPaper) -> None:
+    request_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(200, content=b"%PDF-1.7\nfirst download", request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path,
+        http_client=http_client,
+    )
+    try:
+        first_path = await client.download_pdf(paper)
+        second_path = await client.download_pdf(paper)
+    finally:
+        await http_client.aclose()
+
+    assert first_path == second_path
+    assert request_count == 1
+
+
+@pytest.mark.anyio
+async def test_download_pdf_rejects_non_pdf_and_removes_partial_file(tmp_path, paper: ArxivPaper) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            content=b"<html>not a PDF</html>",
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path,
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(ArxivPDFDownloadError, match="not a valid PDF"):
+            await client.download_pdf(paper)
+    finally:
+        await http_client.aclose()
+
+    assert not (tmp_path / "2412.12345.pdf").exists()
+    assert not (tmp_path / "2412.12345.pdf.part").exists()
+
+
+@pytest.mark.anyio
+async def test_download_pdf_raises_for_http_failure(tmp_path, paper: ArxivPaper) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path,
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(ArxivPDFDownloadError, match="HTTP 404"):
+            await client.download_pdf(paper)
+    finally:
+        await http_client.aclose()
+
+    assert not (tmp_path / "2412.12345.pdf.part").exists()
+
+
+def test_pdf_filename_is_safe_for_legacy_and_malicious_ids() -> None:
+    assert ArxivClient.pdf_filename("hep-th/9901001") == "hep-th_9901001.pdf"
+    assert ArxivClient.pdf_filename("../../dangerous/id") == "dangerous_id.pdf"

@@ -39,3 +39,7 @@ class ConfigurationError(Exception):
 
 class ArxivClientError(Exception):
     """Exception raised when an arXiv API request or response cannot be handled."""
+
+
+class ArxivPDFDownloadError(ArxivClientError):
+    """Exception raised when an arXiv PDF cannot be downloaded or validated."""
