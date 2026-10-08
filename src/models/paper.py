@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, String, Text
+from sqlalchemy import JSON, Column, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from src.db.interfaces.postgresql import Base
 
@@ -16,7 +16,12 @@ class Paper(Base):
     abstract = Column(Text, nullable=False)
     categories = Column(JSON, nullable=False)  # List of category tags
     published_date = Column(DateTime, nullable=False)
+    updated_date = Column(DateTime, nullable=True)
     pdf_url = Column(String, nullable=False)
+    local_pdf_path = Column(String, nullable=True)
+    parser_used = Column(String, nullable=True)
+    page_count = Column(Integer, nullable=True)
+    raw_text = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

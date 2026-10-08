@@ -104,7 +104,7 @@ services:
     environment:
       # Airflow-specific environment setup
       - AIRFLOW_HOME=/opt/airflow
-      - PYTHONPATH=/opt/airflow/src
+      - PYTHONPATH=/opt/airflow
 
       # Container hostnames for Airflow
       - POSTGRES_DATABASE_URL=postgresql+psycopg2://rag_user:rag_password@postgres:5432/rag_db
@@ -114,6 +114,7 @@ services:
       - airflow_logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
       - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
     ports:
       - "8080:8080"
 

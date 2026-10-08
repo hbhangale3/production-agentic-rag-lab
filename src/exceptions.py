@@ -17,9 +17,8 @@ class ParsingException(Exception):
     """Base exception for parsing-related errors."""
 
 
-# Week 2+: PDF parsing exceptions (not implemented in Week 1)
-# class PDFParsingException(ParsingException):
-#     """Base exception for PDF parsing-related errors."""
+class PDFParserError(ParsingException):
+    """Exception raised when a PDF cannot be validated or parsed."""
 
 
 # Week 3+: OpenSearch exceptions (placeholders for Week 1)
@@ -35,3 +34,11 @@ class LLMException(Exception):
 # General application exceptions
 class ConfigurationError(Exception):
     """Exception raised when configuration is invalid."""
+
+
+class ArxivClientError(Exception):
+    """Exception raised when an arXiv API request or response cannot be handled."""
+
+
+class ArxivPDFDownloadError(ArxivClientError):
+    """Exception raised when an arXiv PDF cannot be downloaded or validated."""

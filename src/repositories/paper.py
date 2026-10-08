@@ -1,10 +1,10 @@
-from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from src.models.paper import Paper
-from src.schemas.paper import PaperCreate
+from src.schemas.paper import PaperCreate, PaperUpsert
 
 
 class PaperRepository:
@@ -18,13 +18,13 @@ class PaperRepository:
         self.session.refresh(db_paper)
         return db_paper
 
-    def get_by_arxiv_id(self, arxiv_id: str) -> Optional[Paper]:
+    def get_by_arxiv_id(self, arxiv_id: str) -> Paper | None:
         return self.session.query(Paper).filter(Paper.arxiv_id == arxiv_id).first()
 
-    def get_by_id(self, paper_id: UUID) -> Optional[Paper]:
+    def get_by_id(self, paper_id: UUID) -> Paper | None:
         return self.session.query(Paper).filter(Paper.id == paper_id).first()
 
-    def get_all(self, limit: int = 100, offset: int = 0) -> List[Paper]:
+    def get_all(self, limit: int = 100, offset: int = 0) -> list[Paper]:
         return self.session.query(Paper).order_by(Paper.published_date.desc()).limit(limit).offset(offset).all()
 
     def update(self, paper: Paper) -> Paper:
@@ -33,14 +33,22 @@ class PaperRepository:
         self.session.refresh(paper)
         return paper
 
-    def upsert(self, paper_create: PaperCreate) -> Paper:
-        # Check if paper already exists
-        existing_paper = self.get_by_arxiv_id(paper_create.arxiv_id)
-        if existing_paper:
-            # Update existing paper
-            for key, value in paper_create.model_dump(exclude_unset=True).items():
-                setattr(existing_paper, key, value)
-            return self.update(existing_paper)
-        else:
-            # Create new paper
-            return self.create(paper_create)
+    def upsert(self, paper_data: PaperCreate | PaperUpsert) -> Paper:
+        """Atomically insert or update a paper using its unique arXiv ID."""
+        values = paper_data.model_dump(exclude_unset=True)
+        statement = insert(Paper).values(**values)
+        update_values = {
+            field: getattr(statement.excluded, field) for field in values if field not in {"id", "arxiv_id", "created_at"}
+        }
+        update_values["updated_at"] = func.now()
+        statement = statement.on_conflict_do_update(
+            index_elements=[Paper.arxiv_id],
+            set_=update_values,
+        ).returning(Paper.id)
+
+        paper_id = self.session.execute(statement).scalar_one()
+        self.session.commit()
+        paper = self.session.get(Paper, paper_id)
+        if paper is None:
+            raise RuntimeError(f"Upserted paper {paper_id} could not be loaded")
+        return paper
