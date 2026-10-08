@@ -38,6 +38,8 @@ class Settings(DefaultSettings):
     embedding_device: str = "cpu"
     embedding_batch_size: int = Field(default=32, gt=0)
     vector_search_max_results: int = Field(default=100, gt=0, le=10_000)
+    hybrid_rrf_k: int = Field(default=60, gt=0)
+    hybrid_candidate_multiplier: int = Field(default=4, gt=0)
     opensearch_chunk_index_name: str = "arxiv-papers-chunks"
     chunk_target_words: int = Field(default=600, gt=0)
     chunk_overlap_words: int = Field(default=100, ge=0)

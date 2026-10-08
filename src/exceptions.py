@@ -34,6 +34,14 @@ class VectorSearchError(Exception):
     """Exception raised when semantic vector retrieval cannot be completed safely."""
 
 
+class ChunkBM25SearchError(Exception):
+    """Exception raised when chunk-level lexical retrieval fails."""
+
+
+class HybridSearchError(Exception):
+    """Exception raised when neither hybrid retrieval path can produce results."""
+
+
 # Week 6+: LLM exceptions (placeholders for Week 1)
 class LLMException(Exception):
     """Base exception for LLM-related errors."""
