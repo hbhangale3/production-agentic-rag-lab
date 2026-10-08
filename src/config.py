@@ -36,6 +36,10 @@ class Settings(DefaultSettings):
     arxiv_max_retries: int = 3
     arxiv_pdf_cache_dir: str = "data/arxiv_pdfs"
 
+    # PDF parser configuration
+    pdf_parser_max_file_size_mb: int = 50
+    pdf_parser_max_pages: int = 100
+
 
 def get_settings() -> Settings:
     """Get application settings."""

@@ -17,9 +17,8 @@ class ParsingException(Exception):
     """Base exception for parsing-related errors."""
 
 
-# Week 2+: PDF parsing exceptions (not implemented in Week 1)
-# class PDFParsingException(ParsingException):
-#     """Base exception for PDF parsing-related errors."""
+class PDFParserError(ParsingException):
+    """Exception raised when a PDF cannot be validated or parsed."""
 
 
 # Week 3+: OpenSearch exceptions (placeholders for Week 1)
