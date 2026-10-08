@@ -159,3 +159,21 @@ def test_index_document_returns_false_for_client_exception() -> None:
     raw_client.index.side_effect = OpenSearchException("indexing unavailable")
 
     assert OpenSearchClient(client=raw_client, index_name="papers").index_document("2610.01963", {}) is False
+
+
+def test_search_uses_configured_index_and_returns_response() -> None:
+    raw_client = Mock()
+    raw_client.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}}
+    body = {"query": {"match_all": {}}}
+
+    result = OpenSearchClient(client=raw_client, index_name="configured-papers").search(body)
+
+    assert result == raw_client.search.return_value
+    raw_client.search.assert_called_once_with(index="configured-papers", body=body)
+
+
+def test_search_returns_none_for_client_exception() -> None:
+    raw_client = Mock()
+    raw_client.search.side_effect = OpenSearchException("search unavailable")
+
+    assert OpenSearchClient(client=raw_client, index_name="papers").search({}) is None

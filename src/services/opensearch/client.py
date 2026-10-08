@@ -78,6 +78,14 @@ class OpenSearchClient:
             logger.warning("Could not index OpenSearch document %s: %s", document_id, exc)
             return False
 
+    def search(self, body: dict[str, Any]) -> dict[str, Any] | None:
+        """Execute caller-built search DSL against the configured index."""
+        try:
+            return self._client.search(index=self.index_name, body=body)
+        except OpenSearchException as exc:
+            logger.warning("OpenSearch search failed for index %s: %s", self.index_name, exc)
+            return None
+
     def _index_exists(self) -> bool:
         return bool(self._client.indices.exists(index=self.index_name))
 
