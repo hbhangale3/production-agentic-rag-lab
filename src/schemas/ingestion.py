@@ -18,5 +18,6 @@ class IngestionResult(BaseModel):
     pdfs_downloaded: int = Field(default=0, ge=0)
     pdfs_parsed: int = Field(default=0, ge=0)
     papers_stored: int = Field(default=0, ge=0)
+    stored_arxiv_ids: list[str] = Field(default_factory=list)
     processing_time: float = Field(default=0.0, ge=0)
     errors: list[IngestionError] = Field(default_factory=list)

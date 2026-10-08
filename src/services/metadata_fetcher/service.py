@@ -92,8 +92,9 @@ class MetadataFetcher:
 
             if repository is not None:
                 try:
-                    repository.upsert(self._make_paper_upsert(paper, local_pdf_path, parsed_pdf))
+                    stored_paper = repository.upsert(self._make_paper_upsert(paper, local_pdf_path, parsed_pdf))
                     result.papers_stored += 1
+                    result.stored_arxiv_ids.append(stored_paper.arxiv_id)
                 except Exception as exc:
                     db_session.rollback()
                     self._record_paper_error(result, paper, "store", exc)

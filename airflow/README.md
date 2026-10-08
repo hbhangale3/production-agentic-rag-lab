@@ -51,6 +51,12 @@ Profiles run sequentially. A paper matching multiple profiles remains one row
 because PostgreSQL upserts on `arxiv_id`; the PDF cache avoids duplicate downloads,
 but a cached PDF may still be parsed again if profiles overlap within one run.
 
+After each profile commits its papers to PostgreSQL, the DAG reloads those
+canonical rows and indexes them in OpenSearch using `arxiv_id` as the document
+ID. PostgreSQL remains the source of truth. Per-paper work remains isolated, but
+the Airflow task fails after processing when any ingestion or indexing failure
+was recorded, so partial failures are visible in the final task state.
+
 The arXiv client supports both category filters and application-owned advanced
 queries. The host `data/` directory is mounted into Airflow so cached PDFs can
 be reused.

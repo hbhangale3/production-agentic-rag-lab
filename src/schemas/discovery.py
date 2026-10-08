@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from src.schemas.indexing import PaperIndexingResult
 from src.schemas.ingestion import IngestionResult
 
 
@@ -25,6 +26,7 @@ class DiscoveryProfileResult(BaseModel):
 
     profile_name: str
     result: IngestionResult
+    indexing: PaperIndexingResult = Field(default_factory=PaperIndexingResult)
 
 
 class DiscoveryRunResult(BaseModel):
@@ -32,3 +34,5 @@ class DiscoveryRunResult(BaseModel):
 
     profiles: list[DiscoveryProfileResult] = Field(default_factory=list)
     aggregate: IngestionResult = Field(default_factory=IngestionResult)
+    indexing: PaperIndexingResult = Field(default_factory=PaperIndexingResult)
+    failed: int = Field(default=0, ge=0)
