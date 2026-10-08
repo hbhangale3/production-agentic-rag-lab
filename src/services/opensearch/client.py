@@ -2,6 +2,7 @@ import logging
 
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import OpenSearchException
+from src.services.opensearch.index_config import ARXIV_PAPERS_MAPPING
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,44 @@ class OpenSearchClient:
         if not healthy:
             logger.warning("OpenSearch reported an unhealthy cluster status: %s", status or "missing")
         return healthy
+
+    def index_exists(self) -> bool:
+        """Return whether the configured index exists and is reachable."""
+        try:
+            return self._index_exists()
+        except OpenSearchException as exc:
+            logger.warning("Could not check OpenSearch index %s: %s", self.index_name, exc)
+            return False
+
+    def create_index(self) -> bool:
+        """Create the configured index if absent without modifying an existing index."""
+        try:
+            if self._index_exists():
+                logger.info("OpenSearch index %s already exists; leaving it unchanged", self.index_name)
+                return True
+            self._client.indices.create(index=self.index_name, body=ARXIV_PAPERS_MAPPING)
+            logger.info("Created OpenSearch index %s", self.index_name)
+            return True
+        except OpenSearchException as exc:
+            logger.warning("Could not create OpenSearch index %s: %s", self.index_name, exc)
+            return False
+
+    def get_index_stats(self) -> dict[str, int] | None:
+        """Return normalized document-count and storage statistics for the index."""
+        try:
+            stats = self._client.indices.stats(index=self.index_name)
+        except OpenSearchException as exc:
+            logger.warning("Could not read OpenSearch index stats for %s: %s", self.index_name, exc)
+            return None
+
+        totals = stats["_all"]["total"]
+        return {
+            "document_count": totals["docs"]["count"],
+            "size_in_bytes": totals["store"]["size_in_bytes"],
+        }
+
+    def _index_exists(self) -> bool:
+        return bool(self._client.indices.exists(index=self.index_name))
 
     def close(self) -> None:
         """Release transport resources owned by the underlying client."""
