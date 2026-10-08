@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import OpenSearchException
@@ -67,6 +68,15 @@ class OpenSearchClient:
             "document_count": totals["docs"]["count"],
             "size_in_bytes": totals["store"]["size_in_bytes"],
         }
+
+    def index_document(self, document_id: str, document: dict[str, Any]) -> bool:
+        """Create or replace one document using a stable caller-provided ID."""
+        try:
+            self._client.index(index=self.index_name, id=document_id, body=document)
+            return True
+        except OpenSearchException as exc:
+            logger.warning("Could not index OpenSearch document %s: %s", document_id, exc)
+            return False
 
     def _index_exists(self) -> bool:
         return bool(self._client.indices.exists(index=self.index_name))

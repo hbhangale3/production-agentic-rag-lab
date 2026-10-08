@@ -140,3 +140,22 @@ def test_mapping_matches_persisted_searchable_fields_without_vectors() -> None:
     assert properties["parser_used"]["type"] == "keyword"
     assert properties["page_count"]["type"] == "integer"
     assert "vector" not in str(ARXIV_PAPERS_MAPPING).lower()
+
+
+def test_index_document_uses_configured_index_and_stable_document_id() -> None:
+    raw_client = Mock()
+    client = OpenSearchClient(client=raw_client, index_name="configured-papers")
+    document = {"arxiv_id": "2610.01963", "title": "Paper"}
+
+    assert client.index_document("2610.01963", document) is True
+    assert client.index_document("2610.01963", document) is True
+
+    assert raw_client.index.call_count == 2
+    raw_client.index.assert_called_with(index="configured-papers", id="2610.01963", body=document)
+
+
+def test_index_document_returns_false_for_client_exception() -> None:
+    raw_client = Mock()
+    raw_client.index.side_effect = OpenSearchException("indexing unavailable")
+
+    assert OpenSearchClient(client=raw_client, index_name="papers").index_document("2610.01963", {}) is False
