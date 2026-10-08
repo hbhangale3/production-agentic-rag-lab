@@ -44,9 +44,11 @@ class PaperRepository:
         statement = statement.on_conflict_do_update(
             index_elements=[Paper.arxiv_id],
             set_=update_values,
-        ).returning(Paper)
+        ).returning(Paper.id)
 
-        paper = self.session.execute(statement).scalar_one()
+        paper_id = self.session.execute(statement).scalar_one()
         self.session.commit()
-        self.session.refresh(paper)
+        paper = self.session.get(Paper, paper_id)
+        if paper is None:
+            raise RuntimeError(f"Upserted paper {paper_id} could not be loaded")
         return paper

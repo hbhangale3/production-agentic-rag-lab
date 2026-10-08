@@ -31,3 +31,21 @@ In later weeks, this directory will contain:
 - arXiv paper fetching DAGs
 - PDF processing workflows
 - Data pipeline orchestration
+
+## Week 2 paper ingestion
+
+The `arxiv_paper_ingestion` DAG runs the existing application ingestion service
+once per day at 03:00 UTC and can also be triggered manually. Historical runs
+are not backfilled.
+
+Its policy is controlled through environment variables:
+
+- `ARXIV_INGESTION_CATEGORIES` (default `cs.AI,q-bio.QM`)
+- `ARXIV_INGESTION_BATCH_SIZE` (default `2` papers per category)
+- `ARXIV_INGESTION_SCHEDULE` (default `0 3 * * *`)
+- `ARXIV_INGESTION_PROCESS_PDFS` (default `true`)
+
+The current arXiv client supports category filters, not free-text healthcare
+queries. The default therefore provides one AI category and one quantitative
+biology category without attempting to ingest all of arXiv. The host `data/`
+directory is mounted into Airflow so cached PDFs can be reused.
