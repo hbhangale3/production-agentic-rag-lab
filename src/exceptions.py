@@ -30,6 +30,10 @@ class ChunkIndexError(OpenSearchException):
     """Exception raised when the chunk index cannot be managed safely."""
 
 
+class VectorSearchError(Exception):
+    """Exception raised when semantic vector retrieval cannot be completed safely."""
+
+
 # Week 6+: LLM exceptions (placeholders for Week 1)
 class LLMException(Exception):
     """Base exception for LLM-related errors."""

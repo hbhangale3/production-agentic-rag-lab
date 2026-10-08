@@ -114,6 +114,36 @@ def test_stats_are_normalized() -> None:
     raw_client.indices.stats.assert_called_once_with(index=INDEX_NAME)
 
 
+def test_search_chunks_is_read_only_and_uses_only_configured_index() -> None:
+    instance, raw_client = manager()
+    body = {"query": {"knn": {"embedding": {"vector": [0.1], "k": 1}}}}
+    raw_client.search.return_value = {"hits": {"total": 0, "hits": []}}
+
+    assert instance.search_chunks(body) == {"hits": {"total": 0, "hits": []}}
+
+    raw_client.search.assert_called_once_with(index=INDEX_NAME, body=body)
+    raw_client.index.assert_not_called()
+    raw_client.bulk.assert_not_called()
+    raw_client.delete_by_query.assert_not_called()
+    assert "arxiv-papers" not in str(raw_client.method_calls)
+
+
+def test_search_chunks_wraps_transport_failure() -> None:
+    instance, raw_client = manager()
+    raw_client.search.side_effect = OpenSearchException("search unavailable")
+
+    with pytest.raises(ChunkIndexError, match="search unavailable"):
+        instance.search_chunks({"query": {"match_all": {}}})
+
+
+def test_search_chunks_rejects_non_mapping_response() -> None:
+    instance, raw_client = manager()
+    raw_client.search.return_value = None
+
+    with pytest.raises(ChunkIndexError, match="malformed search response"):
+        instance.search_chunks({"query": {"match_all": {}}})
+
+
 @pytest.mark.parametrize("operation", ["exists", "create", "mapping", "stats"])
 def test_opensearch_failures_are_clear(operation: str) -> None:
     instance, raw_client = manager()

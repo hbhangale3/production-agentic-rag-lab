@@ -75,6 +75,18 @@ class ChunkIndexManager:
             raise ChunkIndexError(f"Chunk index {self.index_name!r} does not exist")
         self.validate_chunk_index_mapping(self.get_chunk_index_mapping())
 
+    def search_chunks(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Execute a read-only search against the configured chunk index."""
+        try:
+            response = self._client.search(index=self.index_name, body=body)
+        except OpenSearchLibraryError as exc:
+            raise ChunkIndexError(f"Could not search chunk index {self.index_name!r}: {exc}") from exc
+        if not isinstance(response, dict):
+            raise ChunkIndexError(
+                f"Chunk index {self.index_name!r} returned a malformed search response"
+            )
+        return response
+
     def delete_paper_chunks(self, arxiv_id: str) -> int:
         """Delete only chunks belonging to one exact arXiv ID."""
         try:
