@@ -7,6 +7,8 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.interfaces.base import BaseDatabase
+from src.services.opensearch.factory import make_opensearch_client
+from src.services.search.paper_service import PaperSearchService
 
 # Week 1: Simplified - no API key authentication needed for local learning
 
@@ -44,6 +46,15 @@ def get_opensearch_service(request: Request):
     return getattr(request.app.state, "opensearch_service", None)
 
 
+def get_paper_search_service(request: Request) -> Generator[PaperSearchService, None, None]:
+    """Provide a request-scoped search service and close its OpenSearch transport."""
+    client = make_opensearch_client(request.app.state.settings)
+    try:
+        yield PaperSearchService(client)
+    finally:
+        client.close()
+
+
 # Phase 3: LLM service (skeleton only)
 def get_llm_service(request: Request):
     """Get LLM service from app state (Phase 3 - not implemented yet)."""
@@ -57,5 +68,6 @@ DatabaseDep = Annotated[BaseDatabase, Depends(get_database)]
 SessionDep = Annotated[Session, Depends(get_db_session)]
 PDFParserServiceDep = Annotated[object, Depends(get_pdf_parser_service)]
 OpenSearchServiceDep = Annotated[object, Depends(get_opensearch_service)]
+PaperSearchServiceDep = Annotated[PaperSearchService, Depends(get_paper_search_service)]
 # Phase 3: LLM service dependency (not used in Phase 2)
 # LLMServiceDep = Annotated[object, Depends(get_llm_service)]

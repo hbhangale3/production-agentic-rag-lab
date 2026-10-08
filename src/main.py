@@ -7,7 +7,7 @@ from src.config import get_settings
 from src.db.factory import make_database
 
 # Week 1: No complex middleware needed
-from src.routers import ask, papers, ping
+from src.routers import ask, papers, ping, search
 
 # Setup logging
 logging.basicConfig(
@@ -51,7 +51,7 @@ app = FastAPI(
 )
 
 # Include routers
-for router in (ping.router, papers.router, ask.router):
+for router in (ping.router, papers.router, ask.router, search.router):
     app.include_router(router, prefix="/api/v1")
 
 
