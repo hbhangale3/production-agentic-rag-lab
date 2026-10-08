@@ -202,6 +202,16 @@ docker compose logs            # View logs
 uv run pytest                 # Run tests
 ```
 
+### Manual BM25 API Demo
+
+With FastAPI and OpenSearch running, execute:
+
+```bash
+uv run python scripts/test_bm25_search_apis.py
+```
+
+The script calls all seven Week 3 search endpoints over HTTP using real indexed papers and prints up to five ranked results per strategy. Set `API_BASE_URL` or `RESULT_SIZE` to override the defaults. It is a manual learning, demonstration, and integration-validation tool; it is intentionally outside the normal pytest suite.
+
 ---
 
 ## 🎓 Learning Path
