@@ -26,6 +26,22 @@ class OpenSearchException(Exception):
     """Base exception for OpenSearch-related errors."""
 
 
+class ChunkIndexError(OpenSearchException):
+    """Exception raised when the chunk index cannot be managed safely."""
+
+
+class VectorSearchError(Exception):
+    """Exception raised when semantic vector retrieval cannot be completed safely."""
+
+
+class ChunkBM25SearchError(Exception):
+    """Exception raised when chunk-level lexical retrieval fails."""
+
+
+class HybridSearchError(Exception):
+    """Exception raised when neither hybrid retrieval path can produce results."""
+
+
 # Week 6+: LLM exceptions (placeholders for Week 1)
 class LLMException(Exception):
     """Base exception for LLM-related errors."""
@@ -34,6 +50,22 @@ class LLMException(Exception):
 # General application exceptions
 class ConfigurationError(Exception):
     """Exception raised when configuration is invalid."""
+
+
+class EmbeddingError(Exception):
+    """Base exception for embedding-provider failures."""
+
+
+class EmbeddingModelLoadError(EmbeddingError):
+    """Exception raised when an embedding model cannot be loaded."""
+
+
+class EmbeddingEncodingError(EmbeddingError):
+    """Exception raised when text cannot be encoded."""
+
+
+class EmbeddingDimensionError(EmbeddingError):
+    """Exception raised when an embedding has an incompatible dimension."""
 
 
 class ArxivClientError(Exception):

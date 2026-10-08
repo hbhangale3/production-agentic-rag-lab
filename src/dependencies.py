@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.interfaces.base import BaseDatabase
 from src.services.opensearch.factory import make_opensearch_client
+from src.services.search.hybrid_service import HybridSearchService
 from src.services.search.paper_service import PaperSearchService
 
 # Week 1: Simplified - no API key authentication needed for local learning
@@ -55,6 +56,11 @@ def get_paper_search_service(request: Request) -> Generator[PaperSearchService, 
         client.close()
 
 
+def get_hybrid_search_service(request: Request) -> HybridSearchService:
+    """Return the worker-scoped hybrid service and its shared lazy BGE provider."""
+    return request.app.state.hybrid_search_service
+
+
 # Phase 3: LLM service (skeleton only)
 def get_llm_service(request: Request):
     """Get LLM service from app state (Phase 3 - not implemented yet)."""
@@ -69,5 +75,6 @@ SessionDep = Annotated[Session, Depends(get_db_session)]
 PDFParserServiceDep = Annotated[object, Depends(get_pdf_parser_service)]
 OpenSearchServiceDep = Annotated[object, Depends(get_opensearch_service)]
 PaperSearchServiceDep = Annotated[PaperSearchService, Depends(get_paper_search_service)]
+HybridSearchServiceDep = Annotated[HybridSearchService, Depends(get_hybrid_search_service)]
 # Phase 3: LLM service dependency (not used in Phase 2)
 # LLMServiceDep = Annotated[object, Depends(get_llm_service)]
