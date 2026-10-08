@@ -99,6 +99,48 @@ async def test_fetch_papers_builds_date_query_and_sort_parameters() -> None:
 
 
 @pytest.mark.anyio
+async def test_fetch_papers_passes_encoded_advanced_query_and_sorting() -> None:
+    captured_request: httpx.Request | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_request
+        captured_request = request
+        return httpx.Response(200, text=ARXIV_RESPONSE, request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(base_url="https://export.arxiv.org/api/query", rate_limit_delay=0, http_client=http_client)
+    query = '(all:"health equity" OR all:underserved) AND all:"machine learning"'
+    try:
+        await client.fetch_papers(search_query=query, sort_by="relevance")
+    finally:
+        await http_client.aclose()
+
+    assert captured_request is not None
+    assert captured_request.url.params["search_query"] == query
+    assert "%22health+equity%22" in str(captured_request.url)
+    assert captured_request.url.params["sortBy"] == "relevance"
+
+
+def test_search_query_date_filter_preserves_boolean_grouping() -> None:
+    query = ArxivClient.build_search_query(
+        search_query="all:clinical OR all:medical",
+        from_date=date(2025, 1, 1),
+    )
+
+    assert query == "(all:clinical OR all:medical) AND submittedDate:[202501010000 TO 999912312359]"
+
+
+@pytest.mark.anyio
+async def test_category_and_search_query_are_mutually_exclusive() -> None:
+    client = ArxivClient(base_url="https://export.arxiv.org/api/query", rate_limit_delay=0)
+    try:
+        with pytest.raises(ValueError, match="cannot be used together"):
+            await client.fetch_papers(category="cs.AI", search_query="all:agents")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_fetch_papers_raises_useful_error_for_http_failure() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="bad query", request=request)

@@ -41,8 +41,8 @@ class Settings(DefaultSettings):
     pdf_parser_max_pages: int = 100
 
     # Scheduled ingestion configuration
-    arxiv_ingestion_categories: str = "cs.AI,q-bio.QM"
-    arxiv_ingestion_batch_size: int = 2
+    arxiv_ingestion_profiles: str = "ai,healthcare_ai,health_equity_tech"
+    arxiv_ingestion_batch_size: int = 1
     arxiv_ingestion_schedule: str = "0 3 * * *"
     arxiv_ingestion_process_pdfs: bool = True
 

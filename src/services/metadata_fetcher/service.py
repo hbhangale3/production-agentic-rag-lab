@@ -9,7 +9,7 @@ from src.schemas.arxiv import ArxivPaper
 from src.schemas.ingestion import IngestionError, IngestionResult
 from src.schemas.paper import PaperUpsert
 from src.schemas.parsed_pdf import ParsedPDF
-from src.services.arxiv.client import ArxivClient, SortOrder
+from src.services.arxiv.client import ArxivClient, SortBy, SortOrder
 from src.services.pdf_parser.docling_parser import DoclingPDFParser
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,8 @@ class MetadataFetcher:
         *,
         max_results: int | None = None,
         category: str | None = None,
+        search_query: str | None = None,
+        sort_by: SortBy = "submittedDate",
         sort_order: SortOrder = "descending",
         from_date: date | datetime | None = None,
         to_date: date | datetime | None = None,
@@ -54,7 +56,9 @@ class MetadataFetcher:
         try:
             papers = await self.arxiv_client.fetch_papers(
                 category=category,
+                search_query=search_query,
                 max_results=max_results,
+                sort_by=sort_by,
                 sort_order=sort_order,
                 from_date=from_date,
                 to_date=to_date,

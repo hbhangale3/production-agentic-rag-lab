@@ -67,7 +67,9 @@ async def test_metadata_only_ingestion_forwards_query_and_skips_pdf_services() -
 
     arxiv_client.fetch_papers.assert_awaited_once_with(
         category="q-bio.QM",
+        search_query=None,
         max_results=2,
+        sort_by="submittedDate",
         sort_order="ascending",
         from_date=date(2026, 1, 1),
         to_date=date(2026, 1, 31),
@@ -78,6 +80,30 @@ async def test_metadata_only_ingestion_forwards_query_and_skips_pdf_services() -
     assert len(repository.upserts) == 2
     assert repository.upserts[0].local_pdf_path is None
     assert repository.upserts[0].raw_text is None
+
+
+@pytest.mark.anyio
+async def test_advanced_search_query_is_forwarded_without_domain_policy() -> None:
+    arxiv_client = Mock()
+    arxiv_client.fetch_papers = AsyncMock(return_value=[])
+    fetcher = make_metadata_fetcher(arxiv_client, Mock(), repository_factory=lambda _: FakeRepository())
+
+    await fetcher.fetch_and_process_papers(
+        search_query='all:"health equity" AND all:"machine learning"',
+        sort_by="relevance",
+        process_pdfs=False,
+        store_to_db=False,
+    )
+
+    arxiv_client.fetch_papers.assert_awaited_once_with(
+        category=None,
+        search_query='all:"health equity" AND all:"machine learning"',
+        max_results=None,
+        sort_by="relevance",
+        sort_order="descending",
+        from_date=None,
+        to_date=None,
+    )
 
 
 @pytest.mark.anyio

@@ -16,6 +16,7 @@ from src.schemas.arxiv import ArxivPaper
 logger = logging.getLogger(__name__)
 
 SortOrder = Literal["ascending", "descending"]
+SortBy = Literal["relevance", "lastUpdatedDate", "submittedDate"]
 
 ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
 ARXIV_NAMESPACE = "http://arxiv.org/schemas/atom"
@@ -24,6 +25,7 @@ TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 ARXIV_VERSION_SUFFIX = re.compile(r"v\d+$")
 UNSAFE_FILENAME_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]+")
 PDF_SIGNATURE = b"%PDF-"
+USER_AGENT = "production-agentic-rag-lab/0.1 (arXiv research ingestion)"
 
 
 class ArxivClient:
@@ -54,7 +56,7 @@ class ArxivClient:
         self.rate_limit_delay = rate_limit_delay
         self.max_retries = max_retries
         self.pdf_cache_dir = Path(pdf_cache_dir)
-        self._client = http_client or httpx.AsyncClient(timeout=timeout)
+        self._client = http_client or httpx.AsyncClient(timeout=timeout, headers={"User-Agent": USER_AGENT})
         self._owns_client = http_client is None
         self._rate_limit_lock = asyncio.Lock()
         self._last_request_at: float | None = None
@@ -74,7 +76,9 @@ class ArxivClient:
         self,
         *,
         category: str | None = None,
+        search_query: str | None = None,
         max_results: int | None = None,
+        sort_by: SortBy = "submittedDate",
         sort_order: SortOrder = "descending",
         from_date: date | datetime | None = None,
         to_date: date | datetime | None = None,
@@ -85,9 +89,14 @@ class ArxivClient:
             raise ValueError("max_results must be at least 1")
         if sort_order not in ("ascending", "descending"):
             raise ValueError("sort_order must be 'ascending' or 'descending'")
+        if sort_by not in ("relevance", "lastUpdatedDate", "submittedDate"):
+            raise ValueError("sort_by must be 'relevance', 'lastUpdatedDate', or 'submittedDate'")
+        if category is not None and search_query is not None:
+            raise ValueError("category and search_query cannot be used together")
 
         query = self.build_search_query(
-            category=category or self.search_category,
+            category=(category or self.search_category) if search_query is None else None,
+            search_query=search_query,
             from_date=from_date,
             to_date=to_date,
         )
@@ -95,7 +104,7 @@ class ArxivClient:
             "search_query": query,
             "start": 0,
             "max_results": result_limit,
-            "sortBy": "submittedDate",
+            "sortBy": sort_by,
             "sortOrder": sort_order,
         }
         response = await self._request(params)
@@ -140,23 +149,34 @@ class ArxivClient:
     def build_search_query(
         cls,
         *,
-        category: str,
+        category: str | None = None,
+        search_query: str | None = None,
         from_date: date | datetime | None = None,
         to_date: date | datetime | None = None,
     ) -> str:
         """Build an arXiv query with an optional inclusive submission-date range."""
-        if not category.strip():
+        if category is not None and search_query is not None:
+            raise ValueError("category and search_query cannot be used together")
+        if category is None and search_query is None:
+            raise ValueError("one of category or search_query is required")
+        if category is not None and not category.strip():
             raise ValueError("category cannot be empty")
+        if search_query is not None and not search_query.strip():
+            raise ValueError("search_query cannot be empty")
+        if search_query is not None and any(character in search_query for character in "\r\n\x00"):
+            raise ValueError("search_query cannot contain control characters")
 
         start = cls._normalise_boundary(from_date, end_of_day=False) if from_date else None
         end = cls._normalise_boundary(to_date, end_of_day=True) if to_date else None
         if start and end and start > end:
             raise ValueError("from_date cannot be later than to_date")
 
-        query = f"cat:{category.strip()}"
+        query = f"cat:{category.strip()}" if category is not None else search_query.strip()
         if start or end:
             start_value = cls._format_arxiv_date(start) if start else "000001010000"
             end_value = cls._format_arxiv_date(end) if end else "999912312359"
+            if search_query is not None:
+                query = f"({query})"
             query += f" AND submittedDate:[{start_value} TO {end_value}]"
         return query
 
