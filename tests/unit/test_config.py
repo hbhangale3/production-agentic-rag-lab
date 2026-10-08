@@ -17,6 +17,7 @@ def test_week4_retrieval_defaults() -> None:
     assert settings.embedding_model == "BAAI/bge-small-en-v1.5"
     assert settings.embedding_dimension == 384
     assert settings.embedding_device == "cpu"
+    assert settings.embedding_batch_size == 32
     assert settings.opensearch_chunk_index_name == "arxiv-papers-chunks"
     assert settings.chunk_target_words == 600
     assert settings.chunk_overlap_words == 100
@@ -27,6 +28,7 @@ def test_week4_retrieval_defaults() -> None:
     ("field", "value"),
     [
         ("embedding_dimension", 0),
+        ("embedding_batch_size", 0),
         ("chunk_target_words", 0),
         ("chunk_overlap_words", -1),
         ("chunk_min_words", 0),

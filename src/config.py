@@ -36,6 +36,7 @@ class Settings(DefaultSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dimension: int = Field(default=384, gt=0)
     embedding_device: str = "cpu"
+    embedding_batch_size: int = Field(default=32, gt=0)
     opensearch_chunk_index_name: str = "arxiv-papers-chunks"
     chunk_target_words: int = Field(default=600, gt=0)
     chunk_overlap_words: int = Field(default=100, ge=0)

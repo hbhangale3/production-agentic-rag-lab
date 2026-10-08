@@ -36,6 +36,22 @@ class ConfigurationError(Exception):
     """Exception raised when configuration is invalid."""
 
 
+class EmbeddingError(Exception):
+    """Base exception for embedding-provider failures."""
+
+
+class EmbeddingModelLoadError(EmbeddingError):
+    """Exception raised when an embedding model cannot be loaded."""
+
+
+class EmbeddingEncodingError(EmbeddingError):
+    """Exception raised when text cannot be encoded."""
+
+
+class EmbeddingDimensionError(EmbeddingError):
+    """Exception raised when an embedding has an incompatible dimension."""
+
+
 class ArxivClientError(Exception):
     """Exception raised when an arXiv API request or response cannot be handled."""
 
