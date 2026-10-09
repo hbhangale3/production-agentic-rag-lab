@@ -103,3 +103,80 @@ def test_state_rejects_invalid_delta_and_sources_payloads() -> None:
 
 def test_clear_resets_all_visible_fields() -> None:
     assert clear_demo() == ("", "", "", "**Status:** Ready", "")
+
+
+@pytest.mark.anyio
+async def test_request_details_show_cache_pipeline_and_deterministic_response_time() -> None:
+    client = FakeClient(
+        (
+            SSEEvent(
+                "metadata",
+                {
+                    "retrieval_mode": "hybrid",
+                    "source_count": 2,
+                    "cache_status": "hit",
+                    "retrieval_size": 5,
+                    "embedding_model": "safe-embedding-model",
+                    "embedding_dimension": 384,
+                    "rrf_k": 60,
+                    "llm_temperature": 0.1,
+                    "max_completion_tokens": 1024,
+                    "observability_provider": "langfuse",
+                    "observability_status": "configured",
+                },
+            ),
+            SSEEvent("delta", {"text": "Cached answer [S1]."}),
+            SSEEvent("sources", {"sources": []}),
+            SSEEvent(
+                "done",
+                {"model": "test-model", "prompt_tokens": 10, "completion_tokens": 4},
+            ),
+        )
+    )
+    ticks = iter((10.0, 10.18))
+
+    updates = [update async for update in stream_demo("question", client=client, clock=lambda: next(ticks))]
+
+    details = updates[-1][3]
+    assert "Cache: **HIT**" in details
+    assert "Response time: `0.18 s`" in details
+    assert "Original prompt tokens: `10`" in details
+    assert "Original completion tokens: `4`" in details
+    assert "Retrieval size: `5`" in details
+    assert "Embedding model: `safe-embedding-model`" in details
+    assert "Embedding dimension: `384`" in details
+    assert "RRF k: `60`" in details
+    assert "Temperature: `0.1`" in details
+    assert "Maximum completion tokens: `1024`" in details
+    assert "Observability: `langfuse (configured)`" in details
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("cache_status", "label"),
+    [("miss", "MISS"), ("bypass", "BYPASS"), ("failure", "UNAVAILABLE")],
+)
+async def test_cache_outcomes_are_presented_without_changing_request_success(cache_status, label) -> None:
+    client = FakeClient(
+        (
+            SSEEvent("metadata", {"cache_status": cache_status}),
+            SSEEvent("delta", {"text": "Answer"}),
+            SSEEvent("sources", {"sources": []}),
+            SSEEvent("done", {}),
+        )
+    )
+    ticks = iter((1.0, 1.5))
+
+    updates = [update async for update in stream_demo("question", client=client, clock=lambda: next(ticks))]
+
+    assert f"Cache: **{label}**" in updates[-1][3]
+    assert "validation passed" in updates[-1][2]
+
+
+def test_metadata_remains_backward_compatible_and_ignores_unknown_fields() -> None:
+    state = DemoState()
+
+    state.apply(SSEEvent("metadata", {"retrieval_mode": "hybrid", "unknown_future_field": "ignored"}))
+
+    assert state.retrieval_mode == "hybrid"
+    assert state.cache_status is None

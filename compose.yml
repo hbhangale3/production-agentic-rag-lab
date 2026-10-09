@@ -26,6 +26,25 @@ services:
       # Container-specific overrides (for inter-service communication)
       - OPENSEARCH_HOST=http://opensearch:9200
       - POSTGRES_DATABASE_URL=postgresql+psycopg2://rag_user:rag_password@postgres:5432/rag_db
+      - REDIS_URL=redis://redis:6379/0
+    networks:
+      - rag-network
+
+  # Optional Week 6 exact-response cache infrastructure
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
     networks:
       - rag-network
 
@@ -158,6 +177,7 @@ volumes:
   postgres_data:
   opensearch_data:
   airflow_logs:
+  redis_data:
 
 networks:
   rag-network:

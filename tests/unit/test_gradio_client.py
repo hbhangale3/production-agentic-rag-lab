@@ -46,6 +46,24 @@ def test_parser_handles_one_event_per_chunk_and_all_event_types() -> None:
     ]
 
 
+def test_parser_preserves_optional_cache_and_unknown_metadata_fields() -> None:
+    parser = JSONSSEParser()
+
+    events = parser.feed(
+        frame(
+            "metadata",
+            {"cache_status": "hit", "retrieval_mode": "hybrid", "future_optional": 7},
+        )
+    )
+
+    assert events == [
+        SSEEvent(
+            event="metadata",
+            data={"cache_status": "hit", "retrieval_mode": "hybrid", "future_optional": 7},
+        )
+    ]
+
+
 def test_parser_handles_split_utf8_and_multiple_events_in_one_chunk() -> None:
     parser = JSONSSEParser()
     payload = frame("delta", {"text": "café 世界"}) + frame("done", {"model": None})

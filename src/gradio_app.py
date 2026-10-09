@@ -1,8 +1,9 @@
 import html
 import os
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import gradio as gr
 from src.gradio_client import RAGStreamClient, RAGUIClientError, SSEEvent
@@ -25,6 +26,16 @@ class DemoState:
     model: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    cache_status: str | None = None
+    response_time_seconds: float | None = None
+    retrieval_size: int | None = None
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+    rrf_k: int | None = None
+    llm_temperature: float | None = None
+    max_completion_tokens: int | None = None
+    observability_provider: str | None = None
+    observability_status: str | None = None
     status: str = "Ready"
     terminal: str | None = None
 
@@ -32,6 +43,15 @@ class DemoState:
         if event.event == "metadata":
             self.retrieval_mode = _optional_text(event.data.get("retrieval_mode"))
             self.source_count = _optional_nonnegative_int(event.data.get("source_count"))
+            self.cache_status = _cache_status(event.data.get("cache_status"))
+            self.retrieval_size = _optional_nonnegative_int(event.data.get("retrieval_size"))
+            self.embedding_model = _optional_text(event.data.get("embedding_model"))
+            self.embedding_dimension = _optional_nonnegative_int(event.data.get("embedding_dimension"))
+            self.rrf_k = _optional_nonnegative_int(event.data.get("rrf_k"))
+            self.llm_temperature = _optional_nonnegative_float(event.data.get("llm_temperature"))
+            self.max_completion_tokens = _optional_nonnegative_int(event.data.get("max_completion_tokens"))
+            self.observability_provider = _optional_text(event.data.get("observability_provider"))
+            self.observability_status = _optional_text(event.data.get("observability_status"))
             self.status = "Generating…"
         elif event.event == "delta":
             text = event.data.get("text")
@@ -60,7 +80,12 @@ class DemoState:
             self.terminal = "error"
 
 
-async def stream_demo(question: str, *, client: RAGStreamClient | None = None) -> AsyncIterator[tuple[str, str, str, str]]:
+async def stream_demo(
+    question: str,
+    *,
+    client: RAGStreamClient | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> AsyncIterator[tuple[str, str, str, str]]:
     state = DemoState()
     if not isinstance(question, str) or not question.strip():
         state.status = "Enter a research question before submitting."
@@ -68,11 +93,14 @@ async def stream_demo(question: str, *, client: RAGStreamClient | None = None) -
         return
 
     active_client = client or RAGStreamClient(base_url=os.getenv("RAG_API_BASE_URL", DEFAULT_API_BASE_URL))
+    started_at = clock()
     state.status = "Connecting to RAG API…"
     yield _render(state)
     try:
         async for event in active_client.stream(question):
             state.apply(event)
+            if state.terminal is not None:
+                state.response_time_seconds = max(0.0, clock() - started_at)
             yield _render(state)
     except RAGUIClientError as exc:
         state.sources = []
@@ -80,6 +108,7 @@ async def stream_demo(question: str, *, client: RAGStreamClient | None = None) -
         state.status = str(exc)
         if state.answer:
             state.status += " The partial answer is unvalidated."
+        state.response_time_seconds = max(0.0, clock() - started_at)
         yield _render(state)
 
 
@@ -140,6 +169,11 @@ def _render_sources(sources: list[dict[str, Any]]) -> str:
 
 def _render_execution(state: DemoState) -> str:
     fields = []
+    if state.cache_status:
+        label = "UNAVAILABLE" if state.cache_status == "failure" else state.cache_status.upper()
+        fields.append(f"Cache: **{label}**")
+    if state.response_time_seconds is not None:
+        fields.append(f"Response time: `{state.response_time_seconds:.2f} s`")
     if state.retrieval_mode:
         fields.append(f"Retrieval: `{html.escape(state.retrieval_mode)}`")
     if state.source_count is not None:
@@ -147,9 +181,28 @@ def _render_execution(state: DemoState) -> str:
     if state.model:
         fields.append(f"Model: `{html.escape(state.model)}`")
     if state.prompt_tokens is not None:
-        fields.append(f"Prompt tokens: `{state.prompt_tokens}`")
+        label = "Original prompt tokens" if state.cache_status == "hit" else "Prompt tokens"
+        fields.append(f"{label}: `{state.prompt_tokens}`")
     if state.completion_tokens is not None:
-        fields.append(f"Completion tokens: `{state.completion_tokens}`")
+        label = "Original completion tokens" if state.cache_status == "hit" else "Completion tokens"
+        fields.append(f"{label}: `{state.completion_tokens}`")
+    if state.llm_temperature is not None:
+        fields.append(f"Temperature: `{state.llm_temperature:g}`")
+    if state.max_completion_tokens is not None:
+        fields.append(f"Maximum completion tokens: `{state.max_completion_tokens}`")
+    if state.retrieval_size is not None:
+        fields.append(f"Retrieval size: `{state.retrieval_size}`")
+    if state.embedding_model:
+        fields.append(f"Embedding model: `{html.escape(state.embedding_model)}`")
+    if state.embedding_dimension is not None:
+        fields.append(f"Embedding dimension: `{state.embedding_dimension}`")
+    if state.rrf_k is not None:
+        fields.append(f"RRF k: `{state.rrf_k}`")
+    if state.observability_provider:
+        observability = html.escape(state.observability_provider)
+        if state.observability_status:
+            observability += f" ({html.escape(state.observability_status)})"
+        fields.append(f"Observability: `{observability}`")
     return "  \n".join(fields) if fields else "_Execution metadata will appear here._"
 
 
@@ -159,6 +212,14 @@ def _optional_text(value: object) -> str | None:
 
 def _optional_nonnegative_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _optional_nonnegative_float(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _cache_status(value: object) -> str | None:
+    return value if value in {"hit", "miss", "bypass", "failure"} else None
 
 
 def main() -> None:

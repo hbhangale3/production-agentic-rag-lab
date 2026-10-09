@@ -108,3 +108,103 @@ def test_generation_reserves_prompt_capacity() -> None:
             llm_max_completion_tokens=512,
             llm_token_safety_margin=256,
         )
+
+
+def test_week6_redis_defaults_are_optional_and_secret_safe() -> None:
+    settings = make_settings()
+
+    assert settings.redis_enabled is False
+    assert settings.redis_url.get_secret_value() == "redis://127.0.0.1:6379/0"
+    assert settings.redis_health_timeout_seconds == 1.0
+    assert settings.rag_cache_ttl_seconds == 86_400
+    assert settings.rag_corpus_generation == "corpus-v1"
+    assert "redis://127.0.0.1:6379/0" not in repr(settings)
+
+
+def test_enabled_redis_configuration_is_valid_without_connecting() -> None:
+    settings = make_settings(
+        redis_enabled=True,
+        redis_url="redis://cache.test:6379/2",
+        rag_cache_ttl_seconds=60,
+    )
+
+    assert settings.redis_enabled is True
+    assert settings.redis_url.get_secret_value() == "redis://cache.test:6379/2"
+    assert settings.rag_cache_ttl_seconds == 60
+
+
+@pytest.mark.parametrize("ttl", [0, -1])
+def test_cache_ttl_must_be_positive(ttl: int) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(rag_cache_ttl_seconds=ttl)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 10.1])
+def test_redis_health_timeout_is_small_and_positive(timeout: float) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(redis_health_timeout_seconds=timeout)
+
+
+def test_enabled_redis_requires_nonblank_url() -> None:
+    with pytest.raises(ValidationError, match="Redis URL must not be blank"):
+        make_settings(redis_enabled=True, redis_url="   ")
+
+
+def test_disabled_redis_allows_blank_url_and_requires_no_server() -> None:
+    settings = make_settings(redis_enabled=False, redis_url="")
+
+    assert settings.redis_enabled is False
+
+
+@pytest.mark.parametrize("generation", ["", "   "])
+def test_corpus_generation_must_not_be_blank(generation: str) -> None:
+    with pytest.raises(ValidationError, match="corpus generation"):
+        make_settings(rag_corpus_generation=generation)
+
+
+def test_langfuse_defaults_are_disabled_and_require_no_credentials() -> None:
+    settings = make_settings()
+
+    assert settings.langfuse_enabled is False
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_host == "https://cloud.langfuse.com"
+    assert settings.langfuse_capture_content is False
+    assert settings.langfuse_timeout_seconds == 5
+
+
+@pytest.mark.parametrize(
+    ("public_key", "secret_key", "message"),
+    [
+        (None, "test-secret", "public key"),
+        ("   ", "test-secret", "public key"),
+        ("test-public", None, "secret key"),
+        ("test-public", "   ", "secret key"),
+    ],
+)
+def test_enabled_langfuse_requires_both_keys(public_key, secret_key, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        make_settings(
+            langfuse_enabled=True,
+            langfuse_public_key=public_key,
+            langfuse_secret_key=secret_key,
+        )
+
+
+def test_enabled_langfuse_supports_self_hosting_and_redacts_secret() -> None:
+    settings = make_settings(
+        langfuse_enabled=True,
+        langfuse_public_key="pk-test-only",
+        langfuse_secret_key="obvious-fake-secret",
+        langfuse_host="https://langfuse.internal.example",
+    )
+
+    assert settings.langfuse_host == "https://langfuse.internal.example"
+    assert settings.langfuse_secret_key.get_secret_value() == "obvious-fake-secret"
+    assert "obvious-fake-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 31])
+def test_langfuse_timeout_is_bounded(timeout: int) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(langfuse_timeout_seconds=timeout)

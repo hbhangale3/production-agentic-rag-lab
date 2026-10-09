@@ -58,6 +58,21 @@ class Settings(DefaultSettings):
     llm_token_safety_margin: int = Field(default=256, ge=0)
     rag_retrieval_size: int = Field(default=5, gt=0, le=100)
 
+    # Week 6 optional exact-response cache infrastructure
+    redis_enabled: bool = False
+    redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
+    redis_health_timeout_seconds: float = Field(default=1.0, gt=0, le=10)
+    rag_cache_ttl_seconds: int = Field(default=86_400, gt=0)
+    rag_corpus_generation: str = "corpus-v1"
+
+    # Week 6 optional request observability foundation
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_capture_content: bool = False
+    langfuse_timeout_seconds: int = Field(default=5, gt=0, le=30)
+
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
     arxiv_search_category: str = "cs.AI"
@@ -87,6 +102,25 @@ class Settings(DefaultSettings):
         return normalized
 
     @model_validator(mode="after")
+    def validate_redis_configuration(self) -> "Settings":
+        if self.redis_enabled and not self.redis_url.get_secret_value().strip():
+            raise ValueError("Redis URL must not be blank when Redis caching is enabled")
+        if not self.rag_corpus_generation.strip():
+            raise ValueError("RAG corpus generation must not be blank")
+        return self
+
+    @model_validator(mode="after")
+    def validate_langfuse_configuration(self) -> "Settings":
+        if not self.langfuse_host.strip():
+            raise ValueError("Langfuse host must not be blank")
+        if self.langfuse_enabled:
+            if not self.langfuse_public_key or not self.langfuse_public_key.strip():
+                raise ValueError("Langfuse public key is required when observability is enabled")
+            if self.langfuse_secret_key is None or not self.langfuse_secret_key.get_secret_value().strip():
+                raise ValueError("Langfuse secret key is required when observability is enabled")
+        return self
+
+    @model_validator(mode="after")
     def validate_chunk_sizes(self) -> "Settings":
         """Validate relationships between the future chunking settings."""
         if self.chunk_overlap_words >= self.chunk_target_words:
@@ -94,9 +128,7 @@ class Settings(DefaultSettings):
         if self.chunk_min_words > self.chunk_target_words:
             raise ValueError("minimum chunk size must not exceed the target chunk size")
         if self.llm_max_completion_tokens + self.llm_token_safety_margin >= self.llm_context_window_tokens:
-            raise ValueError(
-                "LLM completion allowance and safety margin must leave prompt capacity"
-            )
+            raise ValueError("LLM completion allowance and safety margin must leave prompt capacity")
         return self
 
 

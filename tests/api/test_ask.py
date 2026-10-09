@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
 from src.dependencies import get_hybrid_search_service, get_rag_generation_service
@@ -106,6 +106,7 @@ async def test_grounded_ask_offloads_retrieval_and_maps_public_response(
     rag.generate.assert_awaited_once_with(
         question="Research question",
         retrieval_result=hybrid.search.return_value,
+        observation=ANY,
     )
     body = response.json()
     assert body["answer"] == "Grounded answer [S1]."

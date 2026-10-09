@@ -35,6 +35,27 @@ By the end of this course, you'll have your own AI research assistant and the sk
 
 ## 🚀 Quick Start
 
+### Week 6 RAG demo
+
+The FastAPI RAG endpoints support optional exact-response Redis caching shared
+between `/api/v1/ask` and `/api/v1/ask/stream`. The Gradio client displays the
+authoritative per-request cache outcome, total response time, and safe pipeline
+metadata. Cache health and process-local counters are available from
+`/api/v1/health`.
+
+Langfuse observability is optional and metadata-only by default. Redis or
+Langfuse outages do not make the core RAG path unavailable. Configure the
+optional services through the documented `REDIS_*`, `RAG_CACHE_*`, and
+`LANGFUSE_*` values in `.env.example`; credentials are not required when they
+are disabled.
+
+Run the API and demo locally with:
+
+```bash
+uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
+RAG_API_BASE_URL=http://127.0.0.1:8001 uv run python -m src.gradio_app
+```
+
 ### **📋 Prerequisites**
 - **Docker Desktop** (with Docker Compose)  
 - **Python 3.12+**
