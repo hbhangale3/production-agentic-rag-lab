@@ -1,4 +1,4 @@
-"""LangGraph topology for guardrail, bounded local retrieval and rewrite, grading, and live discovery."""
+"""LangGraph topology: guardrail, bounded local retrieval and rewrite, grading, and live fallback."""
 
 import asyncio
 from dataclasses import dataclass
@@ -10,7 +10,9 @@ from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
 from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator
+from src.services.agent.live_documents import LiveDocumentProcessor
 from src.services.agent.live_search import LiveArxivSearchResult, LiveResearchSearchService
+from src.services.agent.live_selection import LivePaperSelector, LiveSelectionError
 from src.services.agent.query_rewriter import QueryRewriteError, QueryRewriter
 from src.services.agent.state import AgentState
 from src.services.agent.types import AgentErrorCategory, TerminalReason
@@ -22,6 +24,8 @@ GuardrailRoute = Literal["passed", "rejected", "failed"]
 RetrievalRoute = Literal["retrieved", "failed"]
 EvidenceRoute = Literal["sufficient", "rewrite", "live_fallback", "exhausted", "failed"]
 LiveSearchRoute = Literal["candidates", "empty", "failed"]
+LiveSelectionRoute = Literal["selected", "none", "failed"]
+LiveDocumentRoute = Literal["evidence", "unusable", "failed"]
 RewriteRoute = Literal["rewritten", "failed"]
 
 
@@ -33,6 +37,7 @@ class AgentGraphDependencies:
     hybrid_search_service: HybridSearchService
     evidence_context_builder: EvidenceContextBuilder
     live_search_service: LiveResearchSearchService | None = None
+    live_document_processor: LiveDocumentProcessor | None = None
 
 
 def _next_sequence(state: AgentState) -> int:
@@ -337,6 +342,116 @@ def _route_after_live_search(state: AgentState) -> LiveSearchRoute:
     return "candidates" if state["live_search_result"].count else "empty"
 
 
+def _make_live_selection_node(selector: LivePaperSelector, config: AgentGraphConfig):
+    async def live_paper_selection(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        candidates = state["live_search_result"].candidates
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.LIVE_SELECTION_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(candidate_count=len(candidates)),
+        )
+        try:
+            selection = await selector.select(
+                state["original_question"],
+                candidates,
+                max_papers=config.live_pdf_max_papers,
+            )
+        except LiveSelectionError:
+            return {
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.LIVE_SELECTION_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+        papers = selection.papers[: config.live_pdf_max_papers]
+        return {
+            "live_selected_papers": papers,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.LIVE_SELECTION_COMPLETED,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(candidate_count=len(candidates), selected_count=len(papers)),
+                ),
+            ],
+        }
+
+    return live_paper_selection
+
+
+def _route_after_live_selection(state: AgentState) -> LiveSelectionRoute:
+    if state["error_category"] is not None:
+        return "failed"
+    return "selected" if state["live_selected_papers"] else "none"
+
+
+def _make_live_document_node(processor: LiveDocumentProcessor, config: AgentGraphConfig):
+    async def live_document_processing(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        papers = state["live_selected_papers"]
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.LIVE_DOCUMENT_PROCESSING_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(selected_count=len(papers)),
+        )
+
+        def failed() -> dict[str, Any]:
+            return {
+                "transient_live_evidence": (),
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.LIVE_DOCUMENT_PROCESSING_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+
+        try:
+            result = await processor.process(
+                papers,
+                question=state["original_question"],
+                max_chunks_per_paper=config.live_max_chunks_per_paper,
+            )
+        except Exception:
+            return failed()
+        # Enforce the bounds here too: only selected papers, and a capped number of chunks from each.
+        kept_per_paper = {paper.arxiv_id: 0 for paper in papers}
+        chunks = []
+        for chunk in result.chunks:
+            if kept_per_paper.get(chunk.arxiv_id, config.live_max_chunks_per_paper) < config.live_max_chunks_per_paper:
+                kept_per_paper[chunk.arxiv_id] += 1
+                chunks.append(chunk)
+        if not chunks and result.failed_count >= len(papers):
+            return failed()
+        return {
+            "transient_live_evidence": tuple(chunks),
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.LIVE_DOCUMENT_PROCESSING_COMPLETED,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(
+                        selected_count=len(papers),
+                        processed_count=sum(1 for count in kept_per_paper.values() if count),
+                        failed_count=result.failed_count,
+                        transient_chunk_count=len(chunks),
+                    ),
+                ),
+            ],
+        }
+
+    return live_document_processing
+
+
+def _route_after_live_documents(state: AgentState) -> LiveDocumentRoute:
+    if state["error_category"] is not None:
+        return "failed"
+    return "evidence" if state["transient_live_evidence"] else "unusable"
+
+
 def _complete_insufficient_evidence(state: AgentState) -> dict[str, Any]:
     return {
         "terminal_reason": TerminalReason.INSUFFICIENT_EVIDENCE,
@@ -359,11 +474,13 @@ def build_agent_graph(
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M05 with injected services and no infrastructure creation."""
+    """Compile W7-M06 with injected services and no infrastructure creation."""
 
     graph_config = config or AgentGraphConfig()
     if graph_config.live_fallback_enabled and dependencies.live_search_service is None:
         raise ValueError("live_search_service is required when live_fallback_enabled is true")
+    if graph_config.live_fallback_enabled and dependencies.live_document_processor is None:
+        raise ValueError("live_document_processor is required when live_fallback_enabled is true")
     evaluator = GuardrailEvaluator(llm_provider=dependencies.llm_provider)
     grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
     rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
@@ -383,7 +500,23 @@ def build_agent_graph(
         builder.add_conditional_edges(
             "live_arxiv_search",
             _route_after_live_search,
-            {"candidates": "graph_complete", "empty": "insufficient_evidence", "failed": END},
+            {"candidates": "live_paper_selection", "empty": "insufficient_evidence", "failed": END},
+        )
+        selector = LivePaperSelector(llm_provider=dependencies.llm_provider)
+        builder.add_node("live_paper_selection", _make_live_selection_node(selector, graph_config))
+        builder.add_conditional_edges(
+            "live_paper_selection",
+            _route_after_live_selection,
+            {"selected": "live_document_processing", "none": "insufficient_evidence", "failed": END},
+        )
+        builder.add_node(
+            "live_document_processing",
+            _make_live_document_node(dependencies.live_document_processor, graph_config),
+        )
+        builder.add_conditional_edges(
+            "live_document_processing",
+            _route_after_live_documents,
+            {"evidence": "graph_complete", "unusable": "insufficient_evidence", "failed": END},
         )
     builder.add_node("insufficient_evidence", _complete_insufficient_evidence)
     builder.add_node("graph_complete", _complete_graph)

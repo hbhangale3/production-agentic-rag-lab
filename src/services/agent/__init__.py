@@ -14,12 +14,26 @@ from src.services.agent.guardrail import (
     GuardrailPromptBuilder,
     GuardrailResult,
 )
+from src.services.agent.live_documents import (
+    LiveDocumentProcessingResult,
+    LiveDocumentProcessingService,
+    LiveDocumentProcessor,
+    LivePaperAcquisitionService,
+    LivePDFAcquisitionError,
+    TransientLiveEvidenceChunk,
+)
 from src.services.agent.live_search import (
     ArxivLiveSearchService,
     LiveArxivPaper,
     LiveArxivSearchResult,
     LiveResearchSearchService,
     LiveSearchError,
+)
+from src.services.agent.live_selection import (
+    LivePaperSelection,
+    LivePaperSelectionPromptBuilder,
+    LivePaperSelector,
+    LiveSelectionError,
 )
 from src.services.agent.query_rewriter import (
     QueryRewriteError,
@@ -49,13 +63,23 @@ __all__ = [
     "GuardrailResult",
     "LiveArxivPaper",
     "LiveArxivSearchResult",
+    "LiveDocumentProcessingResult",
+    "LiveDocumentProcessingService",
+    "LiveDocumentProcessor",
+    "LivePDFAcquisitionError",
+    "LivePaperAcquisitionService",
+    "LivePaperSelection",
+    "LivePaperSelectionPromptBuilder",
+    "LivePaperSelector",
     "LiveResearchSearchService",
     "LiveSearchError",
+    "LiveSelectionError",
     "QueryRewriteError",
     "QueryRewritePromptBuilder",
     "QueryRewriteResult",
     "QueryRewriter",
     "TerminalReason",
+    "TransientLiveEvidenceChunk",
     "build_agent_graph",
     "create_initial_agent_state",
 ]

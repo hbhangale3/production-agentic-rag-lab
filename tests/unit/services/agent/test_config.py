@@ -13,6 +13,8 @@ def test_graph_config_defaults_are_bounded() -> None:
     assert config.max_grounding_attempts == 2
     assert config.live_fallback_enabled is True
     assert config.live_arxiv_max_results == 5
+    assert config.live_pdf_max_papers == 2
+    assert config.live_max_chunks_per_paper == 8
 
 
 @pytest.mark.parametrize("threshold", [0, 100])
@@ -65,10 +67,29 @@ def test_invalid_evidence_sufficiency_threshold_is_rejected(threshold: int) -> N
 
 @pytest.mark.parametrize("limit", [1, 10])
 def test_live_arxiv_max_results_boundaries_are_valid(limit: int) -> None:
-    assert AgentGraphConfig(live_arxiv_max_results=limit).live_arxiv_max_results == limit
+    config = AgentGraphConfig(live_arxiv_max_results=limit, live_pdf_max_papers=1)
+
+    assert config.live_arxiv_max_results == limit
 
 
 @pytest.mark.parametrize("limit", [0, -1, 11, 100])
 def test_live_arxiv_max_results_must_stay_small(limit: int) -> None:
     with pytest.raises(ValidationError):
         AgentGraphConfig(live_arxiv_max_results=limit)
+
+
+def test_live_pdf_max_papers_cannot_exceed_live_candidates() -> None:
+    assert AgentGraphConfig(live_arxiv_max_results=3, live_pdf_max_papers=3).live_pdf_max_papers == 3
+    assert AgentGraphConfig(live_arxiv_max_results=1, live_pdf_max_papers=1).live_pdf_max_papers == 1
+    with pytest.raises(ValidationError, match="must not exceed live_arxiv_max_results"):
+        AgentGraphConfig(live_arxiv_max_results=3, live_pdf_max_papers=4)
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(live_arxiv_max_results=1)
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(live_pdf_max_papers=0)
+
+
+@pytest.mark.parametrize("limit", [0, 51])
+def test_live_max_chunks_per_paper_is_bounded(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(live_max_chunks_per_paper=limit)

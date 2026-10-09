@@ -1,10 +1,13 @@
 import dataclasses
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from src.exceptions import ArxivPDFDownloadError, PDFNoTextError, PDFParserError
 from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
+from src.schemas.parsed_pdf import ParsedPDF
 from src.services.agent import (
     AgentErrorCategory,
     AgentExecutionStatus,
@@ -13,12 +16,18 @@ from src.services.agent import (
     EvidenceGrade,
     LiveArxivPaper,
     LiveArxivSearchResult,
+    LiveDocumentProcessingResult,
+    LiveDocumentProcessingService,
+    LivePaperAcquisitionService,
     LiveSearchError,
     TerminalReason,
+    TransientLiveEvidenceChunk,
     build_agent_graph,
     create_initial_agent_state,
 )
 from src.services.agent.query_rewriter import MAX_REWRITTEN_QUERY_CHARACTERS
+from src.services.arxiv.client import ArxivClient
+from src.services.chunking import PaperChunkingService
 from src.services.evidence import EvidenceContextBuilder
 from src.services.search.hybrid_service import HybridSearchService
 
@@ -49,6 +58,17 @@ SECOND_GRADER_FAILED_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.GR
 LOCAL_EXHAUSTED = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT]
 LIVE_COMPLETED_PATH = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.LIVE_FALLBACK_COMPLETED, S.GRAPH_COMPLETED]
 LIVE_FAILED_PATH = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.GRAPH_FAILED]
+LIVE_SEARCHED = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.LIVE_FALLBACK_COMPLETED]
+LIVE_SELECTED = [*LIVE_SEARCHED, S.LIVE_SELECTION_STARTED, S.LIVE_SELECTION_COMPLETED]
+LIVE_DOCUMENT_TAIL = [S.LIVE_DOCUMENT_PROCESSING_STARTED, S.LIVE_DOCUMENT_PROCESSING_COMPLETED, S.GRAPH_COMPLETED]
+LIVE_EVIDENCE_PATH = [*LIVE_SELECTED, *LIVE_DOCUMENT_TAIL]
+LIVE_ZERO_SELECTED_PATH = [*LIVE_SELECTED, S.GRAPH_COMPLETED]
+LIVE_SELECTION_FAILED_PATH = [*LIVE_SEARCHED, S.LIVE_SELECTION_STARTED, S.GRAPH_FAILED]
+LIVE_DOCUMENTS_FAILED_PATH = [*LIVE_SELECTED, S.LIVE_DOCUMENT_PROCESSING_STARTED, S.GRAPH_FAILED]
+SELECT_FIRST = '{"selected_arxiv_ids":["2501.00001"]}'
+SELECT_TWO = '{"selected_arxiv_ids":["2501.00001","2501.00002"]}'
+SELECT_NONE = '{"selected_arxiv_ids":[]}'
+CHUNK_TEXT = "private live chunk text"
 
 
 class FakeLLMProvider:
@@ -100,8 +120,52 @@ def live_result(*arxiv_ids: str) -> LiveArxivSearchResult:
     return LiveArxivSearchResult(query="live query", candidates=tuple(make_live_paper(i) for i in arxiv_ids))
 
 
+def make_chunk(paper: LiveArxivPaper, index: int = 0) -> TransientLiveEvidenceChunk:
+    return TransientLiveEvidenceChunk(
+        arxiv_id=paper.arxiv_id,
+        chunk_id=f"live::{paper.arxiv_id}::chunk::{index:03d}",
+        chunk_index=index,
+        paper_title=paper.title,
+        section_title="Private Section",
+        text=CHUNK_TEXT,
+        word_count=4,
+        authors=paper.authors,
+        categories=paper.categories,
+        published_date=paper.published_date,
+        pdf_url=paper.pdf_url,
+    )
+
+
+def fake_processor(*, unusable=(), failing=(), chunks_per_paper=1, error=None, extra=()):
+    """Processor fake: papers in ``failing`` error, ``unusable`` yield nothing, the rest yield chunks."""
+
+    async def process(papers, *, question, max_chunks_per_paper):
+        if error:
+            raise error
+        usable = [paper for paper in papers if paper.arxiv_id not in {*unusable, *failing}]
+        return LiveDocumentProcessingResult(
+            chunks=(*(make_chunk(paper, index) for paper in usable for index in range(chunks_per_paper)), *extra),
+            selected_count=len(papers),
+            processed_count=len(usable),
+            unusable_count=sum(paper.arxiv_id in unusable for paper in papers),
+            failed_count=sum(paper.arxiv_id in failing for paper in papers),
+        )
+
+    processor = Mock()
+    processor.process = AsyncMock(side_effect=process)
+    return processor
+
+
 def dependencies(
-    *, llm=None, result=None, results=None, retrieval_error=None, max_context_tokens=1000, live=None, live_error=None
+    *,
+    llm=None,
+    result=None,
+    results=None,
+    retrieval_error=None,
+    max_context_tokens=1000,
+    live=None,
+    live_error=None,
+    processor=None,
 ):
     """``results`` scripts successive search calls; an exception item is raised."""
     live_service = Mock()
@@ -117,6 +181,7 @@ def dependencies(
         hybrid_search_service=retrieval,
         evidence_context_builder=EvidenceContextBuilder(max_context_tokens=max_context_tokens),
         live_search_service=live_service,
+        live_document_processor=processor or fake_processor(),
     )
     return deps, provider, retrieval
 
@@ -136,6 +201,8 @@ def assert_no_downstream_progress(result) -> None:
     assert result["grounding_attempts"] == 0
     assert result["live_fallback_used"] is False
     assert result["live_search_result"] is None
+    assert result["live_selected_papers"] is None
+    assert result["transient_live_evidence"] is None
     assert result["live_evidence"] is None
     assert result["final_evidence"] is None
 
@@ -419,7 +486,7 @@ async def test_routing_uses_configured_guardrail_threshold(threshold: int, passe
     assert result["terminal_reason"] == (None if passed else TerminalReason.OUT_OF_SCOPE)
 
 
-def test_graph_compilation_has_conditional_m05_topology() -> None:
+def test_graph_compilation_has_conditional_m06_topology() -> None:
     deps, _, _ = dependencies()
 
     graph = build_agent_graph(dependencies=deps).get_graph()
@@ -433,6 +500,8 @@ def test_graph_compilation_has_conditional_m05_topology() -> None:
         "evidence_grading",
         "query_rewrite",
         "live_arxiv_search",
+        "live_paper_selection",
+        "live_document_processing",
         "insufficient_evidence",
         "graph_complete",
         "__end__",
@@ -453,7 +522,13 @@ def test_graph_compilation_has_conditional_m05_topology() -> None:
         ("query_rewrite", "__end__", True),
         ("evidence_grading", "live_arxiv_search", True),
         ("evidence_grading", "insufficient_evidence", True),
-        ("live_arxiv_search", "graph_complete", True),
+        ("live_arxiv_search", "live_paper_selection", True),
+        ("live_paper_selection", "live_document_processing", True),
+        ("live_paper_selection", "insufficient_evidence", True),
+        ("live_paper_selection", "__end__", True),
+        ("live_document_processing", "graph_complete", True),
+        ("live_document_processing", "insufficient_evidence", True),
+        ("live_document_processing", "__end__", True),
         ("live_arxiv_search", "insufficient_evidence", True),
         ("live_arxiv_search", "__end__", True),
         ("insufficient_evidence", "__end__", False),
@@ -466,6 +541,8 @@ def assert_no_downstream_progress_after_rewrite(result) -> None:
     assert result["grounding_passed"] is None
     assert result["live_fallback_used"] is False
     assert result["live_search_result"] is None
+    assert result["live_selected_papers"] is None
+    assert result["transient_live_evidence"] is None
     assert result["live_evidence"] is None
     assert result["final_evidence"] is None
 
@@ -480,13 +557,15 @@ def retry_dependencies(*grader_and_rewrite: str | Exception, results=None):
     return deps, provider, retrieval, first, second
 
 
-def exhausted_dependencies(*, live=None, live_error=None):
+def exhausted_dependencies(*, live=None, live_error=None, selection: str | Exception = SELECT_FIRST, processor=None):
     """Both local attempts grade insufficient, so the default config reaches live fallback."""
     first, second = retrieval_result(hits=[make_hit("a1", "attempt one evidence")]), retrieval_result(
         hits=[make_hit("b1", "attempt two evidence")]
     )
-    llm = FakeLLMProvider('{"score":90}', '{"score":25}', REWRITE_JSON, '{"score":40}')
-    deps, provider, retrieval = dependencies(llm=llm, results=[first, second], live=live, live_error=live_error)
+    llm = FakeLLMProvider('{"score":90}', '{"score":25}', REWRITE_JSON, '{"score":40}', selection)
+    deps, provider, retrieval = dependencies(
+        llm=llm, results=[first, second], live=live, live_error=live_error, processor=processor
+    )
     return deps, provider, retrieval, second
 
 
@@ -760,26 +839,35 @@ async def test_retrieval_node_refuses_to_exceed_configured_attempts(attempts: in
 
 
 @pytest.mark.anyio
-async def test_live_fallback_discovers_candidates_after_local_exhaustion() -> None:
+async def test_live_candidates_are_selected_processed_and_stored_as_transient_evidence() -> None:
     candidates = live_result("2501.00001", "2501.00002", "2501.00003")
-    deps, provider, retrieval, second = exhausted_dependencies(live=candidates)
+    deps, provider, retrieval, second = exhausted_dependencies(live=candidates, selection=SELECT_TWO)
 
     result = await run(deps, INDIA_QUESTION)
 
-    assert statuses(result) == LIVE_COMPLETED_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(16))
+    assert statuses(result) == LIVE_EVIDENCE_PATH
+    assert [event.sequence for event in result["execution_events"]] == list(range(20))
     assert S.GRAPH_COMPLETED not in statuses(result)[:-1]
     deps.live_search_service.search.assert_awaited_once_with(
         REWRITTEN, max_results=5, exclude_arxiv_ids=("2401.00001",)
     )
     assert [call.args[0] for call in retrieval.search.call_args_list] == [INDIA_QUESTION, REWRITTEN]
-    assert len(provider.calls) == 4
-    assert statuses(result).count(S.QUERY_REWRITTEN) == 1
+    assert len(provider.calls) == 5
+    selection_payload = user_payload(provider.calls[4])
+    assert selection_payload.startswith("UNTRUSTED_SELECTION_INPUT_JSON\n")
+    assert INDIA_QUESTION in selection_payload
+    assert REWRITTEN not in selection_payload
+    selected = candidates.candidates[:2]
+    deps.live_document_processor.process.assert_awaited_once_with(
+        selected, question=INDIA_QUESTION, max_chunks_per_paper=8
+    )
     assert result["original_question"] == INDIA_QUESTION
     assert result["current_query"] == REWRITTEN
     assert result["retrieval_attempts"] == 2
     assert result["live_fallback_used"] is True
     assert result["live_search_result"] == candidates
+    assert result["live_selected_papers"] == selected
+    assert result["transient_live_evidence"] == (make_chunk(selected[0]), make_chunk(selected[1]))
     assert result["local_retrieval_result"] == second
     assert result["evidence_sufficient"] is False
     assert result["evidence_grade"] == EvidenceGrade(score=40, sufficient=False, source_count=1)
@@ -788,13 +876,284 @@ async def test_live_fallback_discovers_candidates_after_local_exhaustion() -> No
     assert result["live_evidence"] is None
     assert result["final_evidence"] is None
     assert result["generated_answer"] is None
-    started, completed = result["execution_events"][13:15]
-    assert started.metadata.model_dump(exclude_none=True) == {"live_fallback_used": True, "max_results": 5}
-    assert completed.metadata.model_dump(exclude_none=True) == {
-        "live_fallback_used": True,
-        "max_results": 5,
-        "candidate_count": 3,
+    assert result["grounding_passed"] is None
+    metadata = [event.metadata.model_dump(exclude_none=True) for event in result["execution_events"][13:19]]
+    assert metadata == [
+        {"live_fallback_used": True, "max_results": 5},
+        {"live_fallback_used": True, "max_results": 5, "candidate_count": 3},
+        {"candidate_count": 3},
+        {"candidate_count": 3, "selected_count": 2},
+        {"selected_count": 2},
+        {"selected_count": 2, "processed_count": 2, "failed_count": 0, "transient_chunk_count": 2},
+    ]
+
+
+@pytest.mark.anyio
+async def test_zero_selected_papers_is_insufficient_evidence_without_processing() -> None:
+    candidates = live_result("2501.00001", "2501.00002")
+    deps, provider, _, second = exhausted_dependencies(live=candidates, selection=SELECT_NONE)
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_ZERO_SELECTED_PATH
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert len(provider.calls) == 5
+    deps.live_document_processor.process.assert_not_awaited()
+    assert result["live_fallback_used"] is True
+    assert result["live_search_result"] == candidates
+    assert result["live_selected_papers"] == ()
+    assert result["transient_live_evidence"] is None
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is False
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+    assert result["execution_events"][16].metadata.selected_count == 0
+
+
+@pytest.mark.anyio
+async def test_only_fabricated_selection_ids_is_treated_as_zero_selection() -> None:
+    deps, _, _, _ = exhausted_dependencies(selection='{"selected_arxiv_ids":["9999.99999"]}')
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_ZERO_SELECTED_PATH
+    deps.live_document_processor.process.assert_not_awaited()
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "selection",
+    [
+        RuntimeError("private selection detail"),
+        "private selection detail, not json",
+        '{"selected_arxiv_ids":["2501.00001"],"reason":"private selection detail"}',
+        '{"selected_arxiv_ids":"2501.00001"}',
+    ],
+)
+async def test_selection_failure_is_distinct_from_zero_selection(selection) -> None:
+    deps, provider, _, _ = exhausted_dependencies(selection=selection)
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_SELECTION_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert len(provider.calls) == 5
+    deps.live_document_processor.process.assert_not_awaited()
+    assert result["live_selected_papers"] is None
+    assert result["transient_live_evidence"] is None
+    assert result["live_search_result"] is not None
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.LIVE_SELECTION_FAILURE
+    assert "private selection detail" not in repr(
+        [event.model_dump(mode="json") for event in result["execution_events"]]
+    )
+
+
+@pytest.mark.anyio
+async def test_partial_document_success_keeps_usable_evidence_and_counts_failure() -> None:
+    candidates = live_result("2501.00001", "2501.00002")
+    deps, _, _, _ = exhausted_dependencies(
+        live=candidates, selection=SELECT_TWO, processor=fake_processor(failing={"2501.00002"})
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_EVIDENCE_PATH
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert result["transient_live_evidence"] == (make_chunk(candidates.candidates[0]),)
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    assert result["execution_events"][18].metadata.model_dump(exclude_none=True) == {
+        "selected_count": 2,
+        "processed_count": 1,
+        "failed_count": 1,
+        "transient_chunk_count": 1,
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("unusable", "failing"),
+    [({"2501.00001", "2501.00002"}, set()), ({"2501.00001"}, {"2501.00002"})],
+)
+async def test_no_usable_content_is_insufficient_evidence_not_failure(unusable: set, failing: set) -> None:
+    deps, _, _, _ = exhausted_dependencies(
+        live=live_result("2501.00001", "2501.00002"),
+        selection=SELECT_TWO,
+        processor=fake_processor(unusable=unusable, failing=failing),
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LIVE_SELECTED, *LIVE_DOCUMENT_TAIL]
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert result["transient_live_evidence"] == ()
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+    assert result["execution_events"][18].metadata.transient_chunk_count == 0
+    assert result["execution_events"][18].metadata.failed_count == len(failing)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "processor",
+    [
+        fake_processor(failing={"2501.00001", "2501.00002"}),
+        fake_processor(error=RuntimeError("private processing detail")),
+    ],
+)
+async def test_all_document_execution_failures_fail_the_graph(processor) -> None:
+    deps, _, _, second = exhausted_dependencies(
+        live=live_result("2501.00001", "2501.00002"), selection=SELECT_TWO, processor=processor
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_DOCUMENTS_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert result["transient_live_evidence"] == ()
+    assert result["local_retrieval_result"] == second
+    assert result["live_search_result"].count == 2
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.LIVE_DOCUMENT_PROCESSING_FAILURE
+    assert "private processing detail" not in repr(
+        {key: value for key, value in result.items() if key != "local_retrieval_result"}
+    )
+
+
+def real_processor(outcomes: dict[str, str]) -> LiveDocumentProcessingService:
+    """The real processing service over a fake client and parser scripted per arXiv ID."""
+
+    async def download_pdf(paper, *, cache_dir, max_bytes):
+        if outcomes[paper.arxiv_id] == "download_error":
+            raise ArxivPDFDownloadError("private document detail")
+        path = Path(cache_dir) / f"{paper.arxiv_id}.pdf"
+        path.write_bytes(b"%PDF-1.7\nfake")
+        return path
+
+    async def parse_pdf(pdf_path):
+        outcome = outcomes[Path(pdf_path).stem]
+        if outcome == "no_text":
+            raise PDFNoTextError(f"private document detail {pdf_path}")
+        if outcome == "parser_error":
+            raise PDFParserError("private document detail")
+        return ParsedPDF(raw_text="usable full text " * 20)
+
+    client = Mock(spec=ArxivClient)
+    client.download_pdf = AsyncMock(side_effect=download_pdf)
+    parser = Mock()
+    parser.parse_pdf = AsyncMock(side_effect=parse_pdf)
+    return LiveDocumentProcessingService(
+        acquisition_service=LivePaperAcquisitionService(arxiv_client=client),
+        pdf_parser=parser,
+        chunking_service=PaperChunkingService(target_words=50, overlap_words=10, min_words=10),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("first", "second", "failed_count"),
+    [("no_text", "no_text", 0), ("no_text", "parser_error", 1), ("no_text", "download_error", 1)],
+)
+async def test_papers_without_extractable_text_are_insufficient_evidence_not_failure(
+    first: str, second: str, failed_count: int
+) -> None:
+    deps, _, _, second_local = exhausted_dependencies(
+        live=live_result("2501.00001", "2501.00002"),
+        selection=SELECT_TWO,
+        processor=real_processor({"2501.00001": first, "2501.00002": second}),
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LIVE_SELECTED, *LIVE_DOCUMENT_TAIL]
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert result["transient_live_evidence"] == ()
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+    assert result["local_retrieval_result"] == second_local
+    assert result["execution_events"][18].metadata.model_dump(exclude_none=True) == {
+        "selected_count": 2,
+        "processed_count": 0,
+        "failed_count": failed_count,
+        "transient_chunk_count": 0,
+    }
+    assert "private document detail" not in repr([event.model_dump(mode="json") for event in result["execution_events"]])
+    assert "private document detail" not in repr(
+        {key: value for key, value in result.items() if key != "local_retrieval_result"}
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("first", "second"), [("parser_error", "parser_error"), ("parser_error", "download_error")])
+async def test_genuine_parser_and_download_failures_for_every_paper_still_fail_the_graph(
+    first: str, second: str
+) -> None:
+    deps, _, _, _ = exhausted_dependencies(
+        live=live_result("2501.00001", "2501.00002"),
+        selection=SELECT_TWO,
+        processor=real_processor({"2501.00001": first, "2501.00002": second}),
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_DOCUMENTS_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert result["transient_live_evidence"] == ()
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.LIVE_DOCUMENT_PROCESSING_FAILURE
+    assert "private document detail" not in repr([event.model_dump(mode="json") for event in result["execution_events"]])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("second", "failed_count"), [("no_text", 0), ("parser_error", 1)])
+async def test_usable_paper_survives_a_no_text_or_failed_sibling(second: str, failed_count: int) -> None:
+    deps, _, _, _ = exhausted_dependencies(
+        live=live_result("2501.00001", "2501.00002"),
+        selection=SELECT_TWO,
+        processor=real_processor({"2501.00001": "usable", "2501.00002": second}),
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_EVIDENCE_PATH
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert {chunk.arxiv_id for chunk in result["transient_live_evidence"]} == {"2501.00001"}
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    completed = result["execution_events"][18].metadata
+    assert (completed.selected_count, completed.processed_count, completed.failed_count) == (2, 1, failed_count)
+
+
+@pytest.mark.anyio
+async def test_live_processing_bounds_are_enforced_by_the_graph() -> None:
+    candidates = live_result(*(f"2501.{index:05d}" for index in range(1, 6)))
+    everything = '{"selected_arxiv_ids":["2501.00001","2501.00002","2501.00003","2501.00004","2501.00005"]}'
+    stray = make_chunk(make_live_paper("2501.00005"))
+    deps, _, _, _ = exhausted_dependencies(
+        live=candidates, selection=everything, processor=fake_processor(chunks_per_paper=7, extra=(stray,))
+    )
+    config = AgentGraphConfig(live_pdf_max_papers=2, live_max_chunks_per_paper=3)
+
+    result = await run(deps, config=config)
+
+    assert result["live_search_result"].count == 5
+    assert [paper.arxiv_id for paper in result["live_selected_papers"]] == ["2501.00001", "2501.00002"]
+    deps.live_document_processor.process.assert_awaited_once()
+    assert deps.live_document_processor.process.await_args.args[0] == candidates.candidates[:2]
+    assert deps.live_document_processor.process.await_args.kwargs["max_chunks_per_paper"] == 3
+    chunks = result["transient_live_evidence"]
+    assert [(chunk.arxiv_id, chunk.chunk_index) for chunk in chunks] == [
+        ("2501.00001", 0),
+        ("2501.00001", 1),
+        ("2501.00001", 2),
+        ("2501.00002", 0),
+        ("2501.00002", 1),
+        ("2501.00002", 2),
+    ]
+    assert len(chunks) <= config.live_pdf_max_papers * config.live_max_chunks_per_paper
+    assert result["execution_events"][18].metadata.transient_chunk_count == 6
 
 
 @pytest.mark.anyio
@@ -810,7 +1169,7 @@ async def test_live_search_uses_configured_bound_even_if_service_returns_more() 
 
 @pytest.mark.anyio
 async def test_single_attempt_config_falls_back_live_with_unrewritten_query() -> None:
-    deps, provider, retrieval = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":25}'))
+    deps, provider, retrieval = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":25}', SELECT_FIRST))
 
     result = await run(deps, INDIA_QUESTION, AgentGraphConfig(max_local_retrieval_attempts=1))
 
@@ -818,10 +1177,12 @@ async def test_single_attempt_config_falls_back_live_with_unrewritten_query() ->
         *FIRST_INSUFFICIENT,
         S.LIVE_FALLBACK_STARTED,
         S.LIVE_FALLBACK_COMPLETED,
-        S.GRAPH_COMPLETED,
+        S.LIVE_SELECTION_STARTED,
+        S.LIVE_SELECTION_COMPLETED,
+        *LIVE_DOCUMENT_TAIL,
     ]
     assert deps.live_search_service.search.await_args.args == (INDIA_QUESTION,)
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
     retrieval.search.assert_called_once()
     assert result["rewritten_query"] is None
     assert result["live_fallback_used"] is True
@@ -875,14 +1236,18 @@ async def test_live_search_failure_is_distinct_from_zero_candidates(error: Excep
 
 @pytest.mark.anyio
 async def test_live_search_is_skipped_when_first_attempt_is_sufficient() -> None:
-    deps, _, _ = dependencies()
+    deps, provider, _ = dependencies()
 
     result = await run(deps)
 
     assert statuses(result) == SUFFICIENT_PATH
+    assert len(provider.calls) == 2
     deps.live_search_service.search.assert_not_awaited()
+    deps.live_document_processor.process.assert_not_awaited()
     assert result["live_fallback_used"] is False
     assert result["live_search_result"] is None
+    assert result["live_selected_papers"] is None
+    assert result["transient_live_evidence"] is None
 
 
 @pytest.mark.anyio
@@ -901,8 +1266,10 @@ async def test_live_search_is_never_reached_from_earlier_terminal_paths(llm: Fak
     result = await run(deps)
 
     deps.live_search_service.search.assert_not_awaited()
+    deps.live_document_processor.process.assert_not_awaited()
     assert result["live_fallback_used"] is False
     assert S.LIVE_FALLBACK_STARTED not in statuses(result)
+    assert S.LIVE_SELECTION_STARTED not in statuses(result)
 
 
 def test_enabled_live_fallback_requires_a_live_search_service() -> None:
@@ -915,9 +1282,11 @@ def test_enabled_live_fallback_requires_a_live_search_service() -> None:
 
     with pytest.raises(ValueError, match="live_search_service is required"):
         build_agent_graph(dependencies=without_live)
+    with pytest.raises(ValueError, match="live_document_processor is required"):
+        build_agent_graph(dependencies=dataclasses.replace(deps, live_document_processor=None))
 
     graph = build_agent_graph(dependencies=without_live, config=LOCAL_ONLY).get_graph()
-    assert "live_arxiv_search" not in graph.nodes
+    assert not {"live_arxiv_search", "live_paper_selection", "live_document_processing"} & set(graph.nodes)
     assert "insufficient_evidence" in graph.nodes
 
 
@@ -933,7 +1302,7 @@ def scenario_dependencies():
         (dependencies(llm=FakeLLMProvider('{"score":90}', "invalid"))[0], None),
         (dependencies(llm=FakeLLMProvider('{"score":90}', RuntimeError("down")))[0], None),
         (retry_dependencies(REWRITE_JSON, '{"score":88}')[0], None),
-        (retry_dependencies(REWRITE_JSON, '{"score":40}')[0], None),
+        (retry_dependencies(REWRITE_JSON, '{"score":40}', SELECT_FIRST)[0], None),
         (retry_dependencies("invalid")[0], None),
         (retry_dependencies(RuntimeError("down"))[0], None),
         (retry_dependencies(REWRITE_JSON, "invalid")[0], None),
@@ -941,6 +1310,11 @@ def scenario_dependencies():
         (retry_dependencies(REWRITE_JSON, '{"score":40}')[0], LOCAL_ONLY),
         (exhausted_dependencies(live=live_result())[0], None),
         (exhausted_dependencies(live_error=LiveSearchError("down"))[0], None),
+        (exhausted_dependencies(selection=SELECT_NONE)[0], None),
+        (exhausted_dependencies(selection="invalid")[0], None),
+        (exhausted_dependencies(processor=fake_processor(unusable={"2501.00001"}))[0], None),
+        (exhausted_dependencies(processor=fake_processor(failing={"2501.00001"}))[0], None),
+        (exhausted_dependencies(processor=fake_processor(error=RuntimeError("down")))[0], None),
     ]
 
 
@@ -955,6 +1329,8 @@ async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequence
         assert path.count(S.LOCAL_RETRIEVAL_STARTED) <= 2
         assert path.count(S.QUERY_REWRITE_STARTED) <= 1
         assert path.count(S.LIVE_FALLBACK_STARTED) <= 1
+        assert path.count(S.LIVE_SELECTION_STARTED) <= 1
+        assert path.count(S.LIVE_DOCUMENT_PROCESSING_STARTED) <= 1
         assert result["retrieval_attempts"] <= 2
 
 
@@ -965,7 +1341,8 @@ async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequence
         ('{"score":85}',),
         ('{"score":85,"reasoning":"secret rationale"}',),
         ('{"score":20}', REWRITE_JSON, '{"score":88}'),
-        ('{"score":20}', REWRITE_JSON, '{"score":30}'),
+        ('{"score":20}', REWRITE_JSON, '{"score":30}', SELECT_FIRST),
+        ('{"score":20}', REWRITE_JSON, '{"score":30}', '{"selected_arxiv_ids":["2501.00001"],"why":"secret rationale"}'),
         ('{"score":20}', f'{{"query":"{REWRITTEN}","rationale":"secret rationale"}}'),
     ],
 )
@@ -993,7 +1370,12 @@ async def test_events_are_deterministic_and_content_free(responses: tuple[str, .
         "Private Author",
         "cs.CY",
         "arxiv.org",
+        "2501.00001",
         "live query",
+        CHUNK_TEXT,
+        "Private Section",
+        "UNTRUSTED_SELECTION_INPUT_JSON",
+        "research-paper selector",
         "UNTRUSTED_QUESTION_JSON",
         "UNTRUSTED_GRADING_INPUT_JSON",
         "UNTRUSTED_REWRITE_INPUT_JSON",

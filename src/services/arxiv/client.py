@@ -110,13 +110,26 @@ class ArxivClient:
         response = await self._request(params)
         return self.parse_response(response.text)
 
-    async def download_pdf(self, paper: ArxivPaper) -> Path:
-        """Download and atomically cache a paper PDF, or reuse a valid cached copy."""
-        target_path = self.pdf_cache_dir / self.pdf_filename(paper.arxiv_id)
+    async def download_pdf(
+        self,
+        paper: ArxivPaper,
+        *,
+        cache_dir: str | Path | None = None,
+        max_bytes: int | None = None,
+    ) -> Path:
+        """Download and atomically cache a paper PDF, or reuse a valid cached copy.
+
+        ``cache_dir`` overrides the configured cache for one call; ``max_bytes``
+        aborts a download whose declared or streamed size exceeds it.
+        """
+        if max_bytes is not None and max_bytes < 1:
+            raise ValueError("max_bytes must be at least 1")
+        pdf_cache_dir = Path(cache_dir) if cache_dir is not None else self.pdf_cache_dir
+        target_path = pdf_cache_dir / self.pdf_filename(paper.arxiv_id)
         partial_path = target_path.with_suffix(".pdf.part")
 
         try:
-            self.pdf_cache_dir.mkdir(parents=True, exist_ok=True)
+            pdf_cache_dir.mkdir(parents=True, exist_ok=True)
             if self._is_valid_cached_pdf(target_path):
                 logger.info("Using cached arXiv PDF: %s", target_path)
                 return target_path
@@ -126,7 +139,7 @@ class ArxivClient:
                 target_path.unlink()
 
             partial_path.unlink(missing_ok=True)
-            await self._download_pdf_with_retries(str(paper.pdf_url), partial_path)
+            await self._download_pdf_with_retries(str(paper.pdf_url), partial_path, max_bytes)
             partial_path.replace(target_path)
             logger.info("Cached arXiv PDF at %s", target_path)
             return target_path
@@ -210,7 +223,7 @@ class ArxivClient:
 
         raise AssertionError("unreachable")
 
-    async def _download_pdf_with_retries(self, url: str, partial_path: Path) -> None:
+    async def _download_pdf_with_retries(self, url: str, partial_path: Path, max_bytes: int | None = None) -> None:
         attempts = self.max_retries + 1
         for attempt in range(attempts):
             await self._respect_rate_limit()
@@ -226,7 +239,7 @@ class ArxivClient:
                         )
                     else:
                         response.raise_for_status()
-                        await self._stream_pdf_to_file(response, partial_path)
+                        await self._stream_pdf_to_file(response, partial_path, max_bytes)
                         return
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 error = exc
@@ -251,7 +264,15 @@ class ArxivClient:
         raise AssertionError("unreachable")
 
     @staticmethod
-    async def _stream_pdf_to_file(response: httpx.Response, partial_path: Path) -> None:
+    async def _stream_pdf_to_file(
+        response: httpx.Response,
+        partial_path: Path,
+        max_bytes: int | None = None,
+    ) -> None:
+        if max_bytes is not None:
+            declared_length = response.headers.get("Content-Length", "")
+            if declared_length.isdigit() and int(declared_length) > max_bytes:
+                raise ArxivPDFDownloadError(f"arXiv PDF exceeds the {max_bytes} byte limit")
         signature = bytearray()
         bytes_written = 0
         with partial_path.open("wb") as pdf_file:
@@ -261,8 +282,10 @@ class ArxivClient:
                 if len(signature) < len(PDF_SIGNATURE):
                     needed = len(PDF_SIGNATURE) - len(signature)
                     signature.extend(chunk[:needed])
-                pdf_file.write(chunk)
                 bytes_written += len(chunk)
+                if max_bytes is not None and bytes_written > max_bytes:
+                    raise ArxivPDFDownloadError(f"arXiv PDF exceeds the {max_bytes} byte limit")
+                pdf_file.write(chunk)
 
         content_type = response.headers.get("Content-Type", "").lower()
         if bytes_written == 0:

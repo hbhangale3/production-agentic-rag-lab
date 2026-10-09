@@ -88,19 +88,24 @@ class LiveResearchSearchService(Protocol):
         ...
 
 
-def build_arxiv_search_query(query: str) -> str | None:
-    """Turn free text into ``all:term OR ...`` so it cannot alter arXiv query syntax."""
+def extract_query_terms(text: str) -> list[str]:
+    """Return distinct alphanumeric content terms in first-seen order."""
 
     terms: list[str] = []
     seen: set[str] = set()
-    for term in _QUERY_TERM.findall(query):
+    for term in _QUERY_TERM.findall(text):
         key = term.casefold()
         if len(term) < 2 or key in _IGNORED_QUERY_TERMS or key in seen:
             continue
         seen.add(key)
         terms.append(term)
-        if len(terms) == MAX_LIVE_QUERY_TERMS:
-            break
+    return terms
+
+
+def build_arxiv_search_query(query: str) -> str | None:
+    """Turn free text into ``all:term OR ...`` so it cannot alter arXiv query syntax."""
+
+    terms = extract_query_terms(query)[:MAX_LIVE_QUERY_TERMS]
     return " OR ".join(f"all:{term}" for term in terms) or None
 
 

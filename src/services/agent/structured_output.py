@@ -46,3 +46,12 @@ def parse_query_object(content: object) -> str:
     if not isinstance(query, str):
         raise StructuredOutputError("query must be a string")
     return query
+
+
+def parse_string_list_object(content: object, field: str) -> list[str]:
+    """Return the list from ``{"<field>": ["...", ...]}`` under the same fence policy."""
+
+    values = _parse_single_field(content, field, StructuredOutputError)
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise StructuredOutputError(f"{field} must be a list of strings")
+    return values

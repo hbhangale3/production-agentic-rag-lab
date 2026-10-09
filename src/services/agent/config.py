@@ -1,6 +1,6 @@
 """Validated behavior configuration for bounded agent graph execution."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AgentGraphConfig(BaseModel):
@@ -19,3 +19,11 @@ class AgentGraphConfig(BaseModel):
     max_grounding_attempts: int = Field(default=2, ge=1)
     live_fallback_enabled: bool = True
     live_arxiv_max_results: int = Field(default=5, ge=1, le=10)
+    live_pdf_max_papers: int = Field(default=2, ge=1)
+    live_max_chunks_per_paper: int = Field(default=8, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def validate_live_bounds(self) -> "AgentGraphConfig":
+        if self.live_pdf_max_papers > self.live_arxiv_max_results:
+            raise ValueError("live_pdf_max_papers must not exceed live_arxiv_max_results")
+        return self

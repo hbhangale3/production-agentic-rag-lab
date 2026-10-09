@@ -22,6 +22,10 @@ class AgentExecutionStatus(StrEnum):
     LOCAL_RETRY_STARTED = "local_retry_started"
     LIVE_FALLBACK_STARTED = "live_fallback_started"
     LIVE_FALLBACK_COMPLETED = "live_fallback_completed"
+    LIVE_SELECTION_STARTED = "live_selection_started"
+    LIVE_SELECTION_COMPLETED = "live_selection_completed"
+    LIVE_DOCUMENT_PROCESSING_STARTED = "live_document_processing_started"
+    LIVE_DOCUMENT_PROCESSING_COMPLETED = "live_document_processing_completed"
     GENERATION_STARTED = "generation_started"
     GENERATION_COMPLETED = "generation_completed"
     GROUNDING_STARTED = "grounding_started"
@@ -42,6 +46,10 @@ class AgentExecutionMetadata(BaseModel):
     live_fallback_used: bool | None = None
     max_results: int | None = Field(default=None, ge=1)
     candidate_count: int | None = Field(default=None, ge=0)
+    selected_count: int | None = Field(default=None, ge=0)
+    processed_count: int | None = Field(default=None, ge=0)
+    failed_count: int | None = Field(default=None, ge=0)
+    transient_chunk_count: int | None = Field(default=None, ge=0)
     guardrail_passed: bool | None = None
     guardrail_score: int | None = Field(default=None, ge=0, le=100)
     evidence_sufficient: bool | None = None

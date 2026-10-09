@@ -21,6 +21,10 @@ class PDFParserError(ParsingException):
     """Exception raised when a PDF cannot be validated or parsed."""
 
 
+class PDFNoTextError(PDFParserError):
+    """Exception raised when a PDF converts successfully but yields no extractable text."""
+
+
 # Week 3+: OpenSearch exceptions (placeholders for Week 1)
 class OpenSearchException(Exception):
     """Base exception for OpenSearch-related errors."""

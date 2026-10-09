@@ -26,6 +26,10 @@ def test_execution_event_has_deterministic_representation() -> None:
             "live_fallback_used": None,
             "max_results": None,
             "candidate_count": None,
+            "selected_count": None,
+            "processed_count": None,
+            "failed_count": None,
+            "transient_chunk_count": None,
             "guardrail_passed": None,
             "guardrail_score": None,
             "evidence_sufficient": None,
@@ -98,3 +102,23 @@ def test_live_fallback_metadata_is_bounded_and_count_only() -> None:
 def test_live_search_failure_is_a_distinct_error_category() -> None:
     assert AgentErrorCategory.LIVE_SEARCH_FAILURE.value == "live_search_failure"
     assert AgentErrorCategory.LIVE_SEARCH_FAILURE is not AgentErrorCategory.RETRIEVAL_FAILURE
+
+
+@pytest.mark.parametrize("field", ["selected_count", "processed_count", "failed_count", "transient_chunk_count"])
+def test_live_document_metadata_is_count_only(field: str) -> None:
+    assert getattr(AgentExecutionMetadata(**{field: 0}), field) == 0
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(**{field: -1})
+
+
+def test_live_document_metadata_rejects_paper_content() -> None:
+    for forbidden in ("arxiv_id", "pdf_url", "chunk_text"):
+        with pytest.raises(ValidationError):
+            AgentExecutionMetadata(**{forbidden: "private"})
+
+
+def test_live_selection_and_processing_vocabulary_is_distinct() -> None:
+    assert AgentExecutionStatus.LIVE_SELECTION_COMPLETED.value == "live_selection_completed"
+    assert AgentExecutionStatus.LIVE_DOCUMENT_PROCESSING_COMPLETED.value == "live_document_processing_completed"
+    assert AgentErrorCategory.LIVE_SELECTION_FAILURE.value == "live_selection_failure"
+    assert AgentErrorCategory.LIVE_DOCUMENT_PROCESSING_FAILURE.value == "live_document_processing_failure"
