@@ -14,6 +14,12 @@ from src.services.agent.guardrail import (
     GuardrailPromptBuilder,
     GuardrailResult,
 )
+from src.services.agent.query_rewriter import (
+    QueryRewriteError,
+    QueryRewritePromptBuilder,
+    QueryRewriter,
+    QueryRewriteResult,
+)
 from src.services.agent.state import AgentState, EvidenceGrade, create_initial_agent_state
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 
@@ -33,6 +39,10 @@ __all__ = [
     "GuardrailEvaluator",
     "GuardrailPromptBuilder",
     "GuardrailResult",
+    "QueryRewriteError",
+    "QueryRewritePromptBuilder",
+    "QueryRewriteResult",
+    "QueryRewriter",
     "TerminalReason",
     "build_agent_graph",
     "create_initial_agent_state",

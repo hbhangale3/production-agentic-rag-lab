@@ -1,4 +1,4 @@
-"""LangGraph topology for domain guardrail, local retrieval, and evidence grading."""
+"""LangGraph topology for guardrail, bounded local retrieval, grading, and one-shot query rewrite."""
 
 import asyncio
 from dataclasses import dataclass
@@ -10,6 +10,7 @@ from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
 from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator
+from src.services.agent.query_rewriter import QueryRewriteError, QueryRewriter
 from src.services.agent.state import AgentState
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 from src.services.evidence import EvidenceContextBuilder
@@ -18,7 +19,8 @@ from src.services.search.hybrid_service import HybridSearchService
 
 GuardrailRoute = Literal["passed", "rejected", "failed"]
 RetrievalRoute = Literal["retrieved", "failed"]
-EvidenceRoute = Literal["sufficient", "insufficient", "failed"]
+EvidenceRoute = Literal["sufficient", "rewrite", "exhausted", "failed"]
+RewriteRoute = Literal["rewritten", "failed"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,15 @@ def _complete_out_of_scope(state: AgentState) -> dict[str, Any]:
 def _make_local_retrieval_node(service: HybridSearchService, config: AgentGraphConfig):
     async def local_retrieval(state: AgentState) -> dict[str, Any]:
         sequence = _next_sequence(state)
+        if state["retrieval_attempts"] >= config.max_local_retrieval_attempts:
+            # Routing prevents this; the node still refuses to exceed the configured total.
+            return {
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.INTERNAL_FAILURE,
+                "execution_events": [
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence)
+                ],
+            }
         attempt = state["retrieval_attempts"] + 1
         started = AgentExecutionEvent(
             status=AgentExecutionStatus.LOCAL_RETRIEVAL_STARTED,
@@ -111,6 +122,8 @@ def _make_local_retrieval_node(service: HybridSearchService, config: AgentGraphC
             return {
                 "retrieval_attempts": attempt,
                 "local_retrieval_result": None,
+                "evidence_sufficient": None,
+                "evidence_grade": None,
                 "terminal_reason": TerminalReason.RETRIEVAL_FAILED,
                 "error_category": AgentErrorCategory.RETRIEVAL_FAILURE,
                 "execution_events": [
@@ -121,6 +134,8 @@ def _make_local_retrieval_node(service: HybridSearchService, config: AgentGraphC
         return {
             "retrieval_attempts": attempt,
             "local_retrieval_result": result,
+            "evidence_sufficient": None,
+            "evidence_grade": None,
             "execution_events": [
                 started,
                 AgentExecutionEvent(
@@ -205,10 +220,62 @@ def _make_evidence_grading_node(
     return evidence_grading
 
 
-def _route_after_evidence_grading(state: AgentState) -> EvidenceRoute:
-    if state["error_category"] is not None:
-        return "failed"
-    return "sufficient" if state["evidence_sufficient"] else "insufficient"
+def _make_evidence_router(config: AgentGraphConfig):
+    def route_after_evidence_grading(state: AgentState) -> EvidenceRoute:
+        if state["error_category"] is not None:
+            return "failed"
+        if state["evidence_sufficient"]:
+            return "sufficient"
+        if state["retrieval_attempts"] < config.max_local_retrieval_attempts:
+            return "rewrite"
+        return "exhausted"
+
+    return route_after_evidence_grading
+
+
+def _make_query_rewrite_node(rewriter: QueryRewriter):
+    async def query_rewrite(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        attempt = state["retrieval_attempts"]
+        metadata = AgentExecutionMetadata(retrieval_attempt=attempt, next_retrieval_attempt=attempt + 1)
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.QUERY_REWRITE_STARTED,
+            sequence=sequence,
+            metadata=metadata,
+        )
+        try:
+            result = await rewriter.rewrite(state["original_question"], state["current_query"])
+        except QueryRewriteError:
+            return {
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.QUERY_REWRITE_FAILURE,
+            }
+        # The previous result and grade describe the previous query, not the one about to run.
+        return {
+            "rewritten_query": result.query,
+            "current_query": result.query,
+            "local_retrieval_result": None,
+            "evidence_sufficient": None,
+            "evidence_grade": None,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.QUERY_REWRITTEN,
+                    sequence=sequence + 1,
+                    metadata=metadata,
+                ),
+            ],
+        }
+
+    return query_rewrite
+
+
+def _route_after_query_rewrite(state: AgentState) -> RewriteRoute:
+    return "failed" if state["error_category"] is not None else "rewritten"
 
 
 def _complete_graph(state: AgentState) -> dict[str, Any]:
@@ -224,11 +291,12 @@ def build_agent_graph(
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M03 with injected services and no infrastructure creation."""
+    """Compile W7-M04 with injected services and no infrastructure creation."""
 
     graph_config = config or AgentGraphConfig()
     evaluator = GuardrailEvaluator(llm_provider=dependencies.llm_provider)
     grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
+    rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
 
     builder = StateGraph(AgentState)
     builder.add_node("graph_start", _start_graph)
@@ -239,6 +307,7 @@ def build_agent_graph(
         "evidence_grading",
         _make_evidence_grading_node(grader, dependencies.evidence_context_builder, graph_config),
     )
+    builder.add_node("query_rewrite", _make_query_rewrite_node(rewriter))
     builder.add_node("graph_complete", _complete_graph)
     builder.add_edge(START, "graph_start")
     builder.add_edge("graph_start", "guardrail")
@@ -255,8 +324,18 @@ def build_agent_graph(
     )
     builder.add_conditional_edges(
         "evidence_grading",
-        _route_after_evidence_grading,
-        {"sufficient": "graph_complete", "insufficient": "graph_complete", "failed": END},
+        _make_evidence_router(graph_config),
+        {
+            "sufficient": "graph_complete",
+            "rewrite": "query_rewrite",
+            "exhausted": "graph_complete",
+            "failed": END,
+        },
+    )
+    builder.add_conditional_edges(
+        "query_rewrite",
+        _route_after_query_rewrite,
+        {"rewritten": "local_retrieval", "failed": END},
     )
     builder.add_edge("graph_complete", END)
     return builder.compile()

@@ -13,12 +13,16 @@ from src.services.agent import (
     build_agent_graph,
     create_initial_agent_state,
 )
+from src.services.agent.query_rewriter import MAX_REWRITTEN_QUERY_CHARACTERS
 from src.services.evidence import EvidenceContextBuilder
 from src.services.search.hybrid_service import HybridSearchService
 
 S = AgentExecutionStatus
 EVIDENCE_TEXT = "private evidence text about clinical NLP"
 INDIA_QUESTION = "What are the current healthcare issues in India and how can AI help solve them?"
+REWRITTEN = "India healthcare challenges artificial intelligence health equity"
+REWRITE_JSON = f'{{"query":"{REWRITTEN}"}}'
+SINGLE_ATTEMPT = AgentGraphConfig(max_local_retrieval_attempts=1)
 
 GUARDRAIL_PASSED = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_PASSED]
 RETRIEVED = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
@@ -28,10 +32,18 @@ GRADER_FAILED_PATH = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.GRAPH_FAILED]
 REJECTED_PATH = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_REJECTED, S.GRAPH_COMPLETED]
 GUARDRAIL_FAILED_PATH = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GRAPH_FAILED]
 RETRIEVAL_FAILED_PATH = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.GRAPH_FAILED]
+FIRST_INSUFFICIENT = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT]
+REWRITTEN_PATH = [*FIRST_INSUFFICIENT, S.QUERY_REWRITE_STARTED, S.QUERY_REWRITTEN]
+SECOND_RETRIEVED = [*REWRITTEN_PATH, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
+RETRY_SUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT, S.GRAPH_COMPLETED]
+RETRY_INSUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT, S.GRAPH_COMPLETED]
+REWRITE_FAILED_PATH = [*FIRST_INSUFFICIENT, S.QUERY_REWRITE_STARTED, S.GRAPH_FAILED]
+SECOND_RETRIEVAL_FAILED_PATH = [*REWRITTEN_PATH, S.LOCAL_RETRIEVAL_STARTED, S.GRAPH_FAILED]
+SECOND_GRADER_FAILED_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.GRAPH_FAILED]
 
 
 class FakeLLMProvider:
-    """Returns scripted completions in call order: guardrail first, then grader."""
+    """Returns scripted completions in call order: guardrail, grader, rewrite, grader."""
 
     def __init__(self, *responses: str | Exception) -> None:
         self.responses = list(responses or ('{"score":90}', '{"score":85}'))
@@ -62,11 +74,12 @@ def retrieval_result(mode: str = "hybrid", hits: list[HybridSearchHit] | None = 
     return HybridSearchResult(query="question", retrieval_mode=mode, count=len(results), results=results)
 
 
-def dependencies(*, llm=None, result=None, retrieval_error=None, max_context_tokens=1000):
+def dependencies(*, llm=None, result=None, results=None, retrieval_error=None, max_context_tokens=1000):
+    """``results`` scripts successive search calls; an exception item is raised."""
     provider = llm or FakeLLMProvider()
     retrieval = Mock(spec=HybridSearchService)
     retrieval.search.return_value = result or retrieval_result()
-    retrieval.search.side_effect = retrieval_error
+    retrieval.search.side_effect = results if results is not None else retrieval_error
     deps = AgentGraphDependencies(
         llm_provider=provider,
         hybrid_search_service=retrieval,
@@ -118,10 +131,10 @@ async def test_sufficient_path_grades_after_one_retrieval_and_completes() -> Non
 
 
 @pytest.mark.anyio
-async def test_insufficient_path_completes_normally_without_rewrite_or_retry() -> None:
+async def test_single_attempt_config_completes_insufficient_without_rewrite_or_retry() -> None:
     deps, provider, retrieval = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":25}'))
 
-    result = await run(deps, INDIA_QUESTION)
+    result = await run(deps, INDIA_QUESTION, SINGLE_ATTEMPT)
 
     assert statuses(result) == INSUFFICIENT_PATH
     assert [event.sequence for event in result["execution_events"]] == list(range(8))
@@ -163,7 +176,10 @@ async def test_evidence_event_metadata_is_bounded_and_operational() -> None:
 async def test_routing_uses_configured_evidence_threshold(threshold: int, score: int, sufficient: bool) -> None:
     deps, _, _ = dependencies(llm=FakeLLMProvider('{"score":90}', f'{{"score":{score}}}'))
 
-    result = await run(deps, config=AgentGraphConfig(evidence_sufficiency_threshold=threshold))
+    result = await run(
+        deps,
+        config=AgentGraphConfig(evidence_sufficiency_threshold=threshold, max_local_retrieval_attempts=1),
+    )
 
     assert result["evidence_sufficient"] is sufficient
     assert result["evidence_grade"].score == score
@@ -206,7 +222,7 @@ async def test_grader_receives_bounded_deterministic_evidence_context() -> None:
 async def test_empty_retrieval_is_insufficient_without_grader_llm_call() -> None:
     deps, provider, retrieval = dependencies(result=retrieval_result(hits=[]))
 
-    result = await run(deps)
+    result = await run(deps, config=SINGLE_ATTEMPT)
 
     assert statuses(result) == INSUFFICIENT_PATH
     assert len(provider.calls) == 1
@@ -368,7 +384,7 @@ async def test_routing_uses_configured_guardrail_threshold(threshold: int, passe
     assert result["terminal_reason"] == (None if passed else TerminalReason.OUT_OF_SCOPE)
 
 
-def test_graph_compilation_has_conditional_m03_topology() -> None:
+def test_graph_compilation_has_conditional_m04_topology() -> None:
     deps, _, _ = dependencies()
 
     graph = build_agent_graph(dependencies=deps).get_graph()
@@ -380,6 +396,7 @@ def test_graph_compilation_has_conditional_m03_topology() -> None:
         "out_of_scope",
         "local_retrieval",
         "evidence_grading",
+        "query_rewrite",
         "graph_complete",
         "__end__",
     }
@@ -393,39 +410,344 @@ def test_graph_compilation_has_conditional_m03_topology() -> None:
         ("local_retrieval", "evidence_grading", True),
         ("local_retrieval", "__end__", True),
         ("evidence_grading", "graph_complete", True),
+        ("evidence_grading", "query_rewrite", True),
         ("evidence_grading", "__end__", True),
+        ("query_rewrite", "local_retrieval", True),
+        ("query_rewrite", "__end__", True),
         ("graph_complete", "__end__", False),
     }
 
 
+def retry_dependencies(*grader_and_rewrite: str | Exception, results=None):
+    """Guardrail passes and attempt 1 grades 25; the remaining responses are scripted."""
+    first, second = retrieval_result(hits=[make_hit("a1", "attempt one evidence")]), retrieval_result(
+        hits=[make_hit("b1", "attempt two evidence"), make_hit("b2", "more attempt two evidence")]
+    )
+    llm = FakeLLMProvider('{"score":90}', '{"score":25}', *grader_and_rewrite)
+    deps, provider, retrieval = dependencies(llm=llm, results=[first, second] if results is None else results)
+    return deps, provider, retrieval, first, second
+
+
+def user_payload(call) -> str:
+    return call[0][1].content
+
+
 @pytest.mark.anyio
-async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequences() -> None:
-    cases = [
-        dependencies()[0],
-        dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":5}'))[0],
-        dependencies(result=retrieval_result(hits=[]))[0],
-        dependencies(llm=FakeLLMProvider('{"score":1}'))[0],
-        dependencies(llm=FakeLLMProvider("invalid"))[0],
-        dependencies(retrieval_error=RuntimeError("down"))[0],
-        dependencies(llm=FakeLLMProvider('{"score":90}', "invalid"))[0],
-        dependencies(llm=FakeLLMProvider('{"score":90}', RuntimeError("down")))[0],
+async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_question() -> None:
+    deps, provider, retrieval, _, second = retry_dependencies(REWRITE_JSON, '{"score":88}')
+
+    result = await run(deps, INDIA_QUESTION)
+
+    assert statuses(result) == RETRY_SUFFICIENT_PATH
+    assert [event.sequence for event in result["execution_events"]] == list(range(14))
+    assert [call.args[0] for call in retrieval.search.call_args_list] == [INDIA_QUESTION, REWRITTEN]
+    assert len(provider.calls) == 4
+    guardrail_call, first_grade, rewrite, second_grade = provider.calls
+    assert user_payload(rewrite).startswith("UNTRUSTED_REWRITE_INPUT_JSON\n")
+    for grade_call in (first_grade, second_grade):
+        assert user_payload(grade_call).startswith("UNTRUSTED_GRADING_INPUT_JSON\n")
+        assert INDIA_QUESTION in user_payload(grade_call)
+        assert REWRITTEN not in user_payload(grade_call)
+    assert "attempt one evidence" in user_payload(first_grade)
+    assert "attempt two evidence" in user_payload(second_grade)
+    assert "attempt one evidence" not in user_payload(second_grade)
+    assert result["original_question"] == INDIA_QUESTION
+    assert result["current_query"] == REWRITTEN
+    assert result["rewritten_query"] == REWRITTEN
+    assert result["retrieval_attempts"] == 2
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is True
+    assert result["evidence_grade"] == EvidenceGrade(score=88, sufficient=True, source_count=2)
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    assert result["generated_answer"] is None
+    assert result["live_fallback_used"] is False
+    assert result["live_evidence"] is None
+
+
+@pytest.mark.anyio
+async def test_retry_still_insufficient_completes_without_third_attempt() -> None:
+    deps, provider, retrieval, _, second = retry_dependencies(REWRITE_JSON, '{"score":40}')
+
+    result = await run(deps, INDIA_QUESTION)
+
+    assert statuses(result) == RETRY_INSUFFICIENT_PATH
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert retrieval.search.call_count == 2
+    assert len(provider.calls) == 4
+    assert statuses(result).count(S.QUERY_REWRITTEN) == 1
+    assert result["retrieval_attempts"] == 2
+    assert result["rewritten_query"] == REWRITTEN
+    assert result["current_query"] == REWRITTEN
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is False
+    assert result["evidence_grade"] == EvidenceGrade(score=40, sufficient=False, source_count=2)
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    assert result["generated_answer"] is None
+    assert result["live_fallback_used"] is False
+
+
+@pytest.mark.anyio
+async def test_attempt_metadata_distinguishes_first_and_second_attempts() -> None:
+    deps, _, _, _, _ = retry_dependencies(REWRITE_JSON, '{"score":88}')
+
+    result = await run(deps)
+
+    metadata = [
+        (event.status, event.metadata.model_dump(exclude_none=True)) for event in result["execution_events"][3:14]
+    ]
+    assert metadata == [
+        (S.LOCAL_RETRIEVAL_STARTED, {"retrieval_attempt": 1}),
+        (S.LOCAL_RETRIEVAL_COMPLETED, {"retrieval_attempt": 1, "source_count": 1}),
+        (S.EVIDENCE_GRADING_STARTED, {"retrieval_attempt": 1, "source_count": 1}),
+        (
+            S.EVIDENCE_INSUFFICIENT,
+            {"retrieval_attempt": 1, "source_count": 1, "evidence_sufficient": False, "evidence_score": 25},
+        ),
+        (S.QUERY_REWRITE_STARTED, {"retrieval_attempt": 1, "next_retrieval_attempt": 2}),
+        (S.QUERY_REWRITTEN, {"retrieval_attempt": 1, "next_retrieval_attempt": 2}),
+        (S.LOCAL_RETRIEVAL_STARTED, {"retrieval_attempt": 2}),
+        (S.LOCAL_RETRIEVAL_COMPLETED, {"retrieval_attempt": 2, "source_count": 2}),
+        (S.EVIDENCE_GRADING_STARTED, {"retrieval_attempt": 2, "source_count": 2}),
+        (
+            S.EVIDENCE_SUFFICIENT,
+            {"retrieval_attempt": 2, "source_count": 2, "evidence_sufficient": True, "evidence_score": 88},
+        ),
+        (S.GRAPH_COMPLETED, {}),
     ]
 
-    for deps in cases:
-        result = await run(deps)
+
+@pytest.mark.anyio
+async def test_empty_first_retrieval_is_rewritten_and_retried_under_default_config() -> None:
+    empty = retrieval_result(hits=[])
+    deps, provider, retrieval = dependencies(
+        llm=FakeLLMProvider('{"score":90}', REWRITE_JSON), results=[empty, empty]
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == RETRY_INSUFFICIENT_PATH
+    assert len(provider.calls) == 2
+    assert retrieval.search.call_count == 2
+    assert result["retrieval_attempts"] == 2
+    assert result["evidence_grade"] == EvidenceGrade(score=0, sufficient=False, source_count=0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "rewrite_response",
+    [
+        RuntimeError("private rewrite detail"),
+        "private rewrite detail, not json",
+        '{"query":"new query","reason":"private rewrite detail"}',
+        '{"query":"   "}',
+        '{"query":"  ai   QUESTION "}',
+        f'{{"query":"{"x" * (MAX_REWRITTEN_QUERY_CHARACTERS + 1)}"}}',
+    ],
+)
+async def test_rewrite_failure_is_controlled_and_skips_second_retrieval(rewrite_response) -> None:
+    deps, provider, retrieval, first, _ = retry_dependencies(rewrite_response)
+
+    result = await run(deps, "AI question")
+
+    assert statuses(result) == REWRITE_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert len(provider.calls) == 3
+    retrieval.search.assert_called_once()
+    assert result["retrieval_attempts"] == 1
+    assert result["rewritten_query"] is None
+    assert result["current_query"] == "AI question"
+    assert result["local_retrieval_result"] == first
+    assert result["evidence_sufficient"] is False
+    assert result["evidence_grade"].score == 25
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.QUERY_REWRITE_FAILURE
+    serialized = repr([event.model_dump(mode="json") for event in result["execution_events"]])
+    assert "private rewrite detail" not in serialized
+    assert "new query" not in serialized
+
+
+@pytest.mark.anyio
+async def test_second_retrieval_failure_counts_as_attempt_two_and_skips_grading() -> None:
+    first = retrieval_result()
+    deps, provider, retrieval, _, _ = retry_dependencies(
+        REWRITE_JSON, results=[first, RuntimeError("private retrieval detail")]
+    )
+
+    result = await run(deps)
+
+    assert statuses(result) == SECOND_RETRIEVAL_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert retrieval.search.call_count == 2
+    assert len(provider.calls) == 3
+    assert result["retrieval_attempts"] == 2
+    assert result["current_query"] == REWRITTEN
+    assert result["local_retrieval_result"] is None
+    assert result["evidence_sufficient"] is None
+    assert result["evidence_grade"] is None
+    assert result["terminal_reason"] == TerminalReason.RETRIEVAL_FAILED
+    assert result["error_category"] == AgentErrorCategory.RETRIEVAL_FAILURE
+    assert "private retrieval detail" not in repr(result["execution_events"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["provider", "parser", "context_builder"])
+async def test_second_grading_failure_does_not_restore_first_grade_or_retry(failure: str) -> None:
+    grader_response = {"provider": RuntimeError("private grader detail"), "parser": "private grader detail"}.get(
+        failure, '{"score":99}'
+    )
+    deps, provider, retrieval, _, second = retry_dependencies(REWRITE_JSON, grader_response)
+    if failure == "context_builder":
+        real = deps.evidence_context_builder
+        builder = Mock(spec=EvidenceContextBuilder)
+        builder.build.side_effect = [real.build(retrieval_result()), RuntimeError("private grader detail")]
+        deps = AgentGraphDependencies(
+            llm_provider=provider, hybrid_search_service=retrieval, evidence_context_builder=builder
+        )
+
+    result = await run(deps)
+
+    assert statuses(result) == SECOND_GRADER_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert retrieval.search.call_count == 2
+    assert statuses(result).count(S.QUERY_REWRITE_STARTED) == 1
+    assert len(provider.calls) == (3 if failure == "context_builder" else 4)
+    assert result["retrieval_attempts"] == 2
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is None
+    assert result["evidence_grade"] is None
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.EVIDENCE_GRADING_FAILURE
+    assert "private grader detail" not in repr(result["execution_events"])
+
+
+@pytest.mark.anyio
+async def test_first_attempt_grade_is_cleared_before_second_attempt_is_graded() -> None:
+    deps, _, _, first, second = retry_dependencies(REWRITE_JSON, '{"score":88}')
+    graph = build_agent_graph(dependencies=deps)
+
+    snapshots = {}
+    async for state in graph.astream(create_initial_agent_state("AI question"), stream_mode="values"):
+        if state["execution_events"]:
+            snapshots[len(state["execution_events"])] = state
+
+    after_first_grade = snapshots[len(FIRST_INSUFFICIENT)]
+    assert after_first_grade["local_retrieval_result"] == first
+    assert after_first_grade["evidence_sufficient"] is False
+    assert after_first_grade["evidence_grade"].score == 25
+
+    after_rewrite = snapshots[len(REWRITTEN_PATH)]
+    assert after_rewrite["current_query"] == REWRITTEN
+    assert after_rewrite["retrieval_attempts"] == 1
+    assert after_rewrite["local_retrieval_result"] is None
+    assert after_rewrite["evidence_sufficient"] is None
+    assert after_rewrite["evidence_grade"] is None
+
+    after_second_retrieval = snapshots[len(SECOND_RETRIEVED)]
+    assert after_second_retrieval["retrieval_attempts"] == 2
+    assert after_second_retrieval["local_retrieval_result"] == second
+    assert after_second_retrieval["evidence_sufficient"] is None
+    assert after_second_retrieval["evidence_grade"] is None
+
+    final = snapshots[len(RETRY_SUFFICIENT_PATH)]
+    assert final["evidence_grade"] == EvidenceGrade(score=88, sufficient=True, source_count=2)
+
+
+@pytest.mark.anyio
+async def test_total_attempts_follow_configuration_and_never_exceed_it() -> None:
+    llm = FakeLLMProvider(
+        '{"score":90}',
+        '{"score":10}',
+        '{"query":"first rewrite"}',
+        '{"score":10}',
+        '{"query":"second rewrite"}',
+        '{"score":10}',
+    )
+    deps, provider, retrieval = dependencies(llm=llm)
+
+    result = await run(deps, config=AgentGraphConfig(max_local_retrieval_attempts=3))
+
+    assert [call.args[0] for call in retrieval.search.call_args_list] == [
+        "AI question",
+        "first rewrite",
+        "second rewrite",
+    ]
+    assert len(provider.calls) == 6
+    assert result["retrieval_attempts"] == 3
+    assert result["rewritten_query"] == "second rewrite"
+    assert result["evidence_sufficient"] is False
+    assert statuses(result)[-1] == S.GRAPH_COMPLETED
+    assert result["terminal_reason"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("attempts", "maximum"), [(2, 2), (3, 2), (1, 1)])
+async def test_retrieval_node_refuses_to_exceed_configured_attempts(attempts: int, maximum: int) -> None:
+    deps, provider, retrieval = dependencies()
+    state = create_initial_agent_state("AI question")
+    state["retrieval_attempts"] = attempts
+    config = AgentGraphConfig(max_local_retrieval_attempts=maximum)
+
+    result = await build_agent_graph(dependencies=deps, config=config).ainvoke(state)
+
+    retrieval.search.assert_not_called()
+    assert statuses(result) == [*GUARDRAIL_PASSED, S.GRAPH_FAILED]
+    assert len(provider.calls) == 1
+    assert result["retrieval_attempts"] == attempts
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.INTERNAL_FAILURE
+
+
+def scenario_dependencies():
+    """One (dependencies, config) pair per distinct graph path."""
+    return [
+        (dependencies()[0], None),
+        (dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":5}'))[0], SINGLE_ATTEMPT),
+        (dependencies(result=retrieval_result(hits=[]))[0], SINGLE_ATTEMPT),
+        (dependencies(llm=FakeLLMProvider('{"score":1}'))[0], None),
+        (dependencies(llm=FakeLLMProvider("invalid"))[0], None),
+        (dependencies(retrieval_error=RuntimeError("down"))[0], None),
+        (dependencies(llm=FakeLLMProvider('{"score":90}', "invalid"))[0], None),
+        (dependencies(llm=FakeLLMProvider('{"score":90}', RuntimeError("down")))[0], None),
+        (retry_dependencies(REWRITE_JSON, '{"score":88}')[0], None),
+        (retry_dependencies(REWRITE_JSON, '{"score":40}')[0], None),
+        (retry_dependencies("invalid")[0], None),
+        (retry_dependencies(RuntimeError("down"))[0], None),
+        (retry_dependencies(REWRITE_JSON, "invalid")[0], None),
+        (retry_dependencies(REWRITE_JSON, results=[retrieval_result(), RuntimeError("down")])[0], None),
+    ]
+
+
+@pytest.mark.anyio
+async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequences() -> None:
+    for deps, config in scenario_dependencies():
+        result = await run(deps, config=config)
         path = statuses(result)
         assert path.count(S.GRAPH_COMPLETED) + path.count(S.GRAPH_FAILED) == 1
         assert path[-1] in {S.GRAPH_COMPLETED, S.GRAPH_FAILED}
         assert [event.sequence for event in result["execution_events"]] == list(range(len(path)))
+        assert path.count(S.LOCAL_RETRIEVAL_STARTED) <= 2
+        assert path.count(S.QUERY_REWRITE_STARTED) <= 1
+        assert result["retrieval_attempts"] <= 2
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("grader_response", ['{"score":85}', '{"score":20}', '{"score":85,"reasoning":"secret rationale"}'])
-async def test_events_are_deterministic_and_content_free(grader_response: str) -> None:
+@pytest.mark.parametrize(
+    "responses",
+    [
+        ('{"score":85}',),
+        ('{"score":85,"reasoning":"secret rationale"}',),
+        ('{"score":20}', REWRITE_JSON, '{"score":88}'),
+        ('{"score":20}', REWRITE_JSON, '{"score":30}'),
+        ('{"score":20}', f'{{"query":"{REWRITTEN}","rationale":"secret rationale"}}'),
+    ],
+)
+async def test_events_are_deterministic_and_content_free(responses: tuple[str, ...]) -> None:
     question = "How is NLP used in clinical decision support?"
 
     async def events():
-        deps, _, _ = dependencies(llm=FakeLLMProvider('{"score":95}', grader_response))
+        deps, _, _ = dependencies(llm=FakeLLMProvider('{"score":95}', *responses))
         result = await run(deps, question)
         return [event.model_dump(mode="json") for event in result["execution_events"]]
 
@@ -437,12 +759,15 @@ async def test_events_are_deterministic_and_content_free(grader_response: str) -
     serialized = repr(first)
     for forbidden in (
         question,
+        REWRITTEN,
         EVIDENCE_TEXT,
         "Private Paper Title",
         "UNTRUSTED_QUESTION_JSON",
         "UNTRUSTED_GRADING_INPUT_JSON",
+        "UNTRUSTED_REWRITE_INPUT_JSON",
         "evidence-sufficiency grader",
-        grader_response,
+        "retrieval-query rewriter",
+        *responses,
         "secret rationale",
     ):
         assert forbidden not in serialized

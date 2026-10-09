@@ -37,6 +37,7 @@ class AgentExecutionMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     retrieval_attempt: int | None = Field(default=None, ge=1)
+    next_retrieval_attempt: int | None = Field(default=None, ge=2)
     source_count: int | None = Field(default=None, ge=0)
     live_fallback_used: bool | None = None
     guardrail_passed: bool | None = None

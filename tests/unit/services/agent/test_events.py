@@ -21,6 +21,7 @@ def test_execution_event_has_deterministic_representation() -> None:
         "sequence": 3,
         "metadata": {
             "retrieval_attempt": 1,
+            "next_retrieval_attempt": None,
             "source_count": 5,
             "live_fallback_used": None,
             "guardrail_passed": None,
@@ -67,3 +68,14 @@ def test_evidence_score_metadata_is_bounded(score: int) -> None:
 def test_evidence_grading_failure_is_a_distinct_error_category() -> None:
     assert AgentErrorCategory.EVIDENCE_GRADING_FAILURE.value == "evidence_grading_failure"
     assert AgentErrorCategory.EVIDENCE_GRADING_FAILURE is not AgentErrorCategory.EVIDENCE_FAILURE
+
+
+def test_next_retrieval_attempt_metadata_is_bounded() -> None:
+    assert AgentExecutionMetadata(retrieval_attempt=1, next_retrieval_attempt=2).next_retrieval_attempt == 2
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(next_retrieval_attempt=1)
+
+
+def test_query_rewrite_failure_is_a_distinct_error_category() -> None:
+    assert AgentErrorCategory.QUERY_REWRITE_FAILURE.value == "query_rewrite_failure"
+    assert AgentErrorCategory.QUERY_REWRITE_FAILURE is not AgentErrorCategory.EVIDENCE_GRADING_FAILURE

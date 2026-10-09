@@ -1,4 +1,4 @@
-"""Strict parsing for the single-score JSON contract shared by agent graders."""
+"""Strict parsing for the single-field JSON contracts used by agent LLM steps."""
 
 import json
 import re
@@ -6,15 +6,17 @@ import re
 _FENCED_JSON = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL)
 
 
-class ScoreOutputError(ValueError):
+class StructuredOutputError(ValueError):
+    """Model output did not match the exact single-field JSON contract."""
+
+
+class ScoreOutputError(StructuredOutputError):
     """Model output did not match the exact ``{"score": <0-100>}`` contract."""
 
 
-def parse_score_object(content: object) -> int:
-    """Return the validated score, tolerating only one surrounding code fence."""
-
+def _parse_single_field(content: object, field: str, error: type[StructuredOutputError]) -> object:
     if not isinstance(content, str) or not content.strip():
-        raise ScoreOutputError("response was empty")
+        raise error("response was empty")
     candidate = content.strip()
     fenced = _FENCED_JSON.match(candidate)
     if fenced:
@@ -22,10 +24,25 @@ def parse_score_object(content: object) -> int:
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise ScoreOutputError("response was not valid JSON") from exc
-    if not isinstance(payload, dict) or set(payload) != {"score"}:
-        raise ScoreOutputError("response must contain only score")
-    score = payload["score"]
+        raise error("response was not valid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {field}:
+        raise error(f"response must contain only {field}")
+    return payload[field]
+
+
+def parse_score_object(content: object) -> int:
+    """Return the validated score, tolerating only one surrounding code fence."""
+
+    score = _parse_single_field(content, "score", ScoreOutputError)
     if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
         raise ScoreOutputError("score must be an integer between 0 and 100")
     return score
+
+
+def parse_query_object(content: object) -> str:
+    """Return the raw string from ``{"query": "..."}`` under the same fence policy."""
+
+    query = _parse_single_field(content, "query", StructuredOutputError)
+    if not isinstance(query, str):
+        raise StructuredOutputError("query must be a string")
+    return query

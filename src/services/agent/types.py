@@ -18,6 +18,7 @@ class AgentErrorCategory(StrEnum):
     RETRIEVAL_FAILURE = "retrieval_failure"
     EVIDENCE_FAILURE = "evidence_failure"
     EVIDENCE_GRADING_FAILURE = "evidence_grading_failure"
+    QUERY_REWRITE_FAILURE = "query_rewrite_failure"
     GENERATION_FAILURE = "generation_failure"
     GROUNDING_FAILURE = "grounding_failure"
     INTERNAL_FAILURE = "internal_failure"
