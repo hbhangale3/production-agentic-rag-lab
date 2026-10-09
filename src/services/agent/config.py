@@ -21,6 +21,7 @@ class AgentGraphConfig(BaseModel):
     live_arxiv_max_results: int = Field(default=5, ge=1, le=10)
     live_pdf_max_papers: int = Field(default=2, ge=1)
     live_max_chunks_per_paper: int = Field(default=8, ge=1, le=50)
+    final_evidence_max_sources: int = Field(default=5, ge=1, le=20)
 
     @model_validator(mode="after")
     def validate_live_bounds(self) -> "AgentGraphConfig":

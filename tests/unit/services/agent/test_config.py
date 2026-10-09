@@ -15,6 +15,7 @@ def test_graph_config_defaults_are_bounded() -> None:
     assert config.live_arxiv_max_results == 5
     assert config.live_pdf_max_papers == 2
     assert config.live_max_chunks_per_paper == 8
+    assert config.final_evidence_max_sources == 5
 
 
 @pytest.mark.parametrize("threshold", [0, 100])
@@ -93,3 +94,14 @@ def test_live_pdf_max_papers_cannot_exceed_live_candidates() -> None:
 def test_live_max_chunks_per_paper_is_bounded(limit: int) -> None:
     with pytest.raises(ValidationError):
         AgentGraphConfig(live_max_chunks_per_paper=limit)
+
+
+@pytest.mark.parametrize("limit", [1, 20])
+def test_final_evidence_max_sources_boundaries_are_valid(limit: int) -> None:
+    assert AgentGraphConfig(final_evidence_max_sources=limit).final_evidence_max_sources == limit
+
+
+@pytest.mark.parametrize("limit", [0, -1, 21])
+def test_final_evidence_max_sources_is_bounded(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(final_evidence_max_sources=limit)

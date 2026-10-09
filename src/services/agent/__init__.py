@@ -7,6 +7,14 @@ from src.services.agent.evidence_grader import (
     EvidenceGradingError,
     EvidenceSufficiencyGrader,
 )
+from src.services.agent.final_evidence import (
+    AgentEvidenceCandidate,
+    EvidenceRerankError,
+    FinalEvidenceSelector,
+    merge_evidence,
+    normalize_live_evidence,
+    normalize_local_evidence,
+)
 from src.services.agent.graph import AgentGraphDependencies, build_agent_graph
 from src.services.agent.guardrail import (
     GuardrailEvaluationError,
@@ -46,6 +54,7 @@ from src.services.agent.types import AgentErrorCategory, TerminalReason
 
 __all__ = [
     "AgentErrorCategory",
+    "AgentEvidenceCandidate",
     "AgentExecutionEvent",
     "AgentExecutionMetadata",
     "AgentExecutionStatus",
@@ -56,7 +65,9 @@ __all__ = [
     "EvidenceGrade",
     "EvidenceGraderPromptBuilder",
     "EvidenceGradingError",
+    "EvidenceRerankError",
     "EvidenceSufficiencyGrader",
+    "FinalEvidenceSelector",
     "GuardrailEvaluationError",
     "GuardrailEvaluator",
     "GuardrailPromptBuilder",
@@ -82,4 +93,7 @@ __all__ = [
     "TransientLiveEvidenceChunk",
     "build_agent_graph",
     "create_initial_agent_state",
+    "merge_evidence",
+    "normalize_live_evidence",
+    "normalize_local_evidence",
 ]

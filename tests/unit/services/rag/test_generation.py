@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import pytest
 from src.config import Settings
 from src.exceptions import (
+    GroundingValidationError,
     InsufficientEvidenceError,
     LLMConfigurationError,
     LLMRequestError,
@@ -11,7 +12,7 @@ from src.exceptions import (
     RAGPromptBudgetError,
 )
 from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
-from src.services.evidence import CharacterTokenEstimator, EvidenceContextBuilder
+from src.services.evidence import CharacterTokenEstimator, EvidenceContextBuilder, EvidenceInput
 from src.services.llm.base import ChatMessage, LLMCompletion, LLMStreamEvent
 from src.services.rag import (
     RAGGenerationService,
@@ -399,3 +400,108 @@ async def test_stream_unknown_citation_fails_after_incremental_text() -> None:
     assert await anext(iterator) == RAGStreamDelta(text="Unsupported [S99].")
     with pytest.raises(LLMResponseError, match="unsupported citation"):
         await anext(iterator)
+
+
+def mixed_context(budget: int = 1000):
+    builder = EvidenceContextBuilder(max_context_tokens=budget)
+    return builder.build_from_sources(
+        [
+            EvidenceInput(
+                chunk_id="live::2501.00001::chunk::002",
+                arxiv_id="2501.00001",
+                chunk_index=2,
+                chunk_text="Live paper reports India-specific access gaps.",
+                paper_title="Live Paper",
+                source_type="live_arxiv",
+                source_url="https://arxiv.org/pdf/2501.00001",
+            ),
+            EvidenceInput.from_hit(hit("paper::chunk::000", "Hybrid retrieval combines two ranked lists.")),
+        ],
+        query="rewritten retrieval query",
+        retrieval_mode="vector_fallback",
+    )
+
+
+@pytest.mark.anyio
+async def test_generate_from_context_matches_generate_for_the_same_evidence() -> None:
+    hits = (
+        hit("paper::chunk::000", "Hybrid retrieval combines two ranked lists."),
+        hit("paper::chunk::001", "RRF produces the final ranking.", index=1),
+    )
+    existing_provider, context_provider = FakeLLMProvider(), FakeLLMProvider()
+    existing_service, context_service = service(existing_provider), service(context_provider)
+
+    existing = await existing_service.generate(question="  What is reported?  ", retrieval_result=retrieval(*hits))
+    from_context = await context_service.generate_from_context(
+        question="  What is reported?  ",
+        evidence=context_service.evidence_builder.build(retrieval(*hits)),
+    )
+
+    assert from_context == existing
+    assert context_provider.calls == existing_provider.calls
+    assert context_provider.calls[0][1:] == (0.1, 512)
+
+
+@pytest.mark.anyio
+async def test_generate_from_context_cites_local_and_live_sources_with_one_label_scheme() -> None:
+    provider = FakeLLMProvider()
+
+    result = await service(provider).generate_from_context(question="What is reported?", evidence=mixed_context())
+
+    assert result.cited_labels == ("[S1]", "[S2]")
+    assert [(source.label, source.source_type) for source in result.sources] == [
+        ("[S1]", "live_arxiv"),
+        ("[S2]", "local"),
+    ]
+    assert result.sources[0].source_url == "https://arxiv.org/pdf/2501.00001"
+    assert result.retrieval_mode == "vector_fallback"
+    assert (result.model, result.prompt_tokens, result.completion_tokens) == ("fake-model", 120, 18)
+    user_prompt = provider.calls[0][0][1].content
+    assert user_prompt.index("[S1] Live Paper") < user_prompt.index("[S2] Grounded Retrieval")
+    assert "rewritten retrieval query" not in user_prompt
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "answer",
+    ["Unknown label [S3].", "No citation for a substantive claim.", "Malformed label [S0].", "Label [S 1]."],
+)
+async def test_generate_from_context_applies_the_same_structural_validator(answer: str) -> None:
+    provider = FakeLLMProvider(completion=LLMCompletion(content=answer, model="fake-model"))
+
+    with pytest.raises(GroundingValidationError):
+        await service(provider).generate_from_context(question="What is reported?", evidence=mixed_context())
+
+
+@pytest.mark.anyio
+async def test_generate_from_context_short_circuits_on_empty_context_and_blank_question() -> None:
+    provider = FakeLLMProvider()
+    generation = service(provider)
+    empty = generation.evidence_builder.build_from_sources([], query="q", retrieval_mode="hybrid")
+
+    with pytest.raises(InsufficientEvidenceError):
+        await generation.generate_from_context(question="What is reported?", evidence=empty)
+    with pytest.raises(ValueError):
+        await generation.generate_from_context(question="   ", evidence=mixed_context())
+
+    assert provider.calls == []
+
+
+@pytest.mark.anyio
+async def test_generate_from_context_enforces_the_same_context_window_budget() -> None:
+    provider = FakeLLMProvider()
+    small_window = service(provider, context_window=1000, completion_tokens=512, safety_margin=256)
+
+    with pytest.raises(RAGPromptBudgetError):
+        await small_window.generate_from_context(question="What is reported?", evidence=mixed_context())
+
+    assert provider.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error", [LLMRequestError("down"), LLMResponseError("bad")])
+async def test_generate_from_context_propagates_provider_errors(error: Exception) -> None:
+    with pytest.raises(type(error)):
+        await service(FakeLLMProvider(error=error)).generate_from_context(
+            question="What is reported?", evidence=mixed_context()
+        )

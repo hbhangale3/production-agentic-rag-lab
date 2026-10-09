@@ -1,11 +1,11 @@
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from src.exceptions import InsufficientEvidenceError, RAGPromptBudgetError
 from src.schemas.hybrid_search import HybridSearchResult
-from src.services.evidence import EvidenceContextBuilder, EvidenceSource, TokenCounter
+from src.services.evidence import EvidenceContext, EvidenceContextBuilder, EvidenceSource, TokenCounter
 from src.services.llm.base import ChatMessage, LLMProvider
 from src.services.observability import Observation
 from src.services.rag.prompt import RAGPromptBuilder
@@ -114,7 +114,25 @@ class RAGGenerationService:
             retrieval_result=retrieval_result,
             observation=observation,
         )
+        return await self._generate_prepared(prepared, observation=observation)
 
+    async def generate_from_context(
+        self,
+        *,
+        question: str,
+        evidence: EvidenceContext,
+        observation: Observation | None = None,
+    ) -> RAGGenerationResult:
+        """Generate from an already-built context using the same prompt, budget, and validation."""
+        prepared = self.prepare_from_context(question=question, evidence=evidence, observation=observation)
+        return await self._generate_prepared(prepared, observation=observation)
+
+    async def _generate_prepared(
+        self,
+        prepared: PreparedRAGGeneration,
+        *,
+        observation: Observation | None,
+    ) -> RAGGenerationResult:
         generation_span = self._start_span(
             observation,
             "rag.generation",
@@ -193,9 +211,40 @@ class RAGGenerationService:
                 "context_token_budget": self.evidence_builder.max_context_tokens,
             },
         )
+        return self._prepare(
+            question=question,
+            build_evidence=lambda: self.evidence_builder.build(retrieval_result),
+            evidence_span=evidence_span,
+        )
+
+    def prepare_from_context(
+        self,
+        *,
+        question: str,
+        evidence: EvidenceContext,
+        observation: Observation | None = None,
+    ) -> PreparedRAGGeneration:
+        """Validate an already-built context against the same generation budget."""
+        evidence_span = self._start_span(
+            observation,
+            "rag.evidence",
+            {
+                "retrieved_count": len(evidence.sources),
+                "context_token_budget": evidence.max_context_tokens,
+            },
+        )
+        return self._prepare(question=question, build_evidence=lambda: evidence, evidence_span=evidence_span)
+
+    def _prepare(
+        self,
+        *,
+        question: str,
+        build_evidence: Callable[[], EvidenceContext],
+        evidence_span: Observation | None,
+    ) -> PreparedRAGGeneration:
         try:
             normalized_question = self.prompt_builder.normalize_question(question)
-            evidence = self.evidence_builder.build(retrieval_result)
+            evidence = build_evidence()
             evidence_metadata: dict[str, object] = {
                 "selected_source_count": len(evidence.sources),
                 "context_tokens": evidence.estimated_tokens,

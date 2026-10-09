@@ -23,6 +23,7 @@ def test_initial_state_preserves_question_and_initializes_future_fields() -> Non
     assert state["transient_live_evidence"] is None
     assert state["live_evidence"] is None
     assert state["final_evidence"] is None
+    assert state["generation_result"] is None
     assert state["generated_answer"] is None
     assert state["grounding_passed"] is None
     assert state["terminal_reason"] is None

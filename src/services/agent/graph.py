@@ -1,4 +1,4 @@
-"""LangGraph topology: guardrail, bounded local retrieval and rewrite, grading, and live fallback."""
+"""LangGraph topology: guardrail, local retrieval and rewrite, grading, live fallback, rerank, generation."""
 
 import asyncio
 from dataclasses import dataclass
@@ -6,9 +6,17 @@ from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from src.exceptions import InsufficientEvidenceError
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
+from src.services.agent.final_evidence import (
+    FinalEvidenceSelector,
+    merge_evidence,
+    normalize_live_evidence,
+    normalize_local_evidence,
+    to_evidence_inputs,
+)
 from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator
 from src.services.agent.live_documents import LiveDocumentProcessor
 from src.services.agent.live_search import LiveArxivSearchResult, LiveResearchSearchService
@@ -16,8 +24,10 @@ from src.services.agent.live_selection import LivePaperSelector, LiveSelectionEr
 from src.services.agent.query_rewriter import QueryRewriteError, QueryRewriter
 from src.services.agent.state import AgentState
 from src.services.agent.types import AgentErrorCategory, TerminalReason
+from src.services.embeddings.base import EmbeddingProvider
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm import LLMProvider
+from src.services.rag.service import RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
 
 GuardrailRoute = Literal["passed", "rejected", "failed"]
@@ -26,6 +36,8 @@ EvidenceRoute = Literal["sufficient", "rewrite", "live_fallback", "exhausted", "
 LiveSearchRoute = Literal["candidates", "empty", "failed"]
 LiveSelectionRoute = Literal["selected", "none", "failed"]
 LiveDocumentRoute = Literal["evidence", "unusable", "failed"]
+RerankRoute = Literal["selected", "empty", "failed"]
+GenerationRoute = Literal["generated", "insufficient", "failed"]
 RewriteRoute = Literal["rewritten", "failed"]
 
 
@@ -36,6 +48,8 @@ class AgentGraphDependencies:
     llm_provider: LLMProvider
     hybrid_search_service: HybridSearchService
     evidence_context_builder: EvidenceContextBuilder
+    embedding_provider: EmbeddingProvider
+    rag_generation_service: RAGGenerationService
     live_search_service: LiveResearchSearchService | None = None
     live_document_processor: LiveDocumentProcessor | None = None
 
@@ -452,6 +466,115 @@ def _route_after_live_documents(state: AgentState) -> LiveDocumentRoute:
     return "evidence" if state["transient_live_evidence"] else "unusable"
 
 
+def _make_evidence_rerank_node(selector: FinalEvidenceSelector, config: AgentGraphConfig):
+    async def evidence_rerank(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        # Locally insufficient evidence is still partial support, so it is merged with any live chunks.
+        local = normalize_local_evidence(state["local_retrieval_result"])
+        live = normalize_live_evidence(state["transient_live_evidence"])
+        merged = merge_evidence(local, live)
+        counts = {
+            "local_candidate_count": len(local),
+            "live_candidate_count": len(live),
+            "merged_candidate_count": len(merged),
+        }
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.EVIDENCE_RERANK_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(**counts),
+        )
+        try:
+            final = await selector.select(
+                state["original_question"],
+                merged,
+                max_sources=config.final_evidence_max_sources,
+            )
+        except Exception:
+            return {
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.EVIDENCE_RERANK_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+        return {
+            "final_evidence": final,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.EVIDENCE_RERANK_COMPLETED,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(**counts, final_source_count=len(final)),
+                ),
+            ],
+        }
+
+    return evidence_rerank
+
+
+def _route_after_evidence_rerank(state: AgentState) -> RerankRoute:
+    if state["error_category"] is not None:
+        return "failed"
+    return "selected" if state["final_evidence"] else "empty"
+
+
+def _make_generation_node(service: RAGGenerationService, context_builder: EvidenceContextBuilder):
+    async def answer_generation(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        final = state["final_evidence"]
+        local_result = state["local_retrieval_result"]
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.GENERATION_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(final_source_count=len(final)),
+        )
+        try:
+            evidence = context_builder.build_from_sources(
+                to_evidence_inputs(final),
+                query=state["current_query"],
+                retrieval_mode=local_result.retrieval_mode,
+                degradation_reason=local_result.degradation_reason,
+            )
+            result = await service.generate_from_context(question=state["original_question"], evidence=evidence)
+        except InsufficientEvidenceError:
+            # Nothing fit the context budget: there is no evidence to answer from, which is not a failure.
+            return {"execution_events": [started]}
+        except Exception:
+            return {
+                "terminal_reason": TerminalReason.GENERATION_FAILED,
+                "error_category": AgentErrorCategory.GENERATION_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+        return {
+            "generation_result": result,
+            "generated_answer": result.answer,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.GENERATION_COMPLETED,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(
+                        final_source_count=len(result.sources),
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                    ),
+                ),
+            ],
+        }
+
+    return answer_generation
+
+
+def _route_after_generation(state: AgentState) -> GenerationRoute:
+    if state["error_category"] is not None:
+        return "failed"
+    return "generated" if state["generation_result"] is not None else "insufficient"
+
+
 def _complete_insufficient_evidence(state: AgentState) -> dict[str, Any]:
     return {
         "terminal_reason": TerminalReason.INSUFFICIENT_EVIDENCE,
@@ -474,7 +597,7 @@ def build_agent_graph(
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M06 with injected services and no infrastructure creation."""
+    """Compile W7-M07 with injected services and no infrastructure creation."""
 
     graph_config = config or AgentGraphConfig()
     if graph_config.live_fallback_enabled and dependencies.live_search_service is None:
@@ -484,6 +607,7 @@ def build_agent_graph(
     evaluator = GuardrailEvaluator(llm_provider=dependencies.llm_provider)
     grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
     rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
+    final_selector = FinalEvidenceSelector(embedding_provider=dependencies.embedding_provider)
 
     builder = StateGraph(AgentState)
     builder.add_node("graph_start", _start_graph)
@@ -516,8 +640,23 @@ def build_agent_graph(
         builder.add_conditional_edges(
             "live_document_processing",
             _route_after_live_documents,
-            {"evidence": "graph_complete", "unusable": "insufficient_evidence", "failed": END},
+            {"evidence": "evidence_rerank", "unusable": "insufficient_evidence", "failed": END},
         )
+    builder.add_node("evidence_rerank", _make_evidence_rerank_node(final_selector, graph_config))
+    builder.add_conditional_edges(
+        "evidence_rerank",
+        _route_after_evidence_rerank,
+        {"selected": "answer_generation", "empty": "insufficient_evidence", "failed": END},
+    )
+    builder.add_node(
+        "answer_generation",
+        _make_generation_node(dependencies.rag_generation_service, dependencies.evidence_context_builder),
+    )
+    builder.add_conditional_edges(
+        "answer_generation",
+        _route_after_generation,
+        {"generated": "graph_complete", "insufficient": "insufficient_evidence", "failed": END},
+    )
     builder.add_node("insufficient_evidence", _complete_insufficient_evidence)
     builder.add_node("graph_complete", _complete_graph)
     builder.add_edge(START, "graph_start")
@@ -537,7 +676,7 @@ def build_agent_graph(
         "evidence_grading",
         _make_evidence_router(graph_config),
         {
-            "sufficient": "graph_complete",
+            "sufficient": "evidence_rerank",
             "rewrite": "query_rewrite",
             "live_fallback": "live_arxiv_search" if graph_config.live_fallback_enabled else "insufficient_evidence",
             "exhausted": "insufficient_evidence",

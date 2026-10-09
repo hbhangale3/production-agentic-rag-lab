@@ -1,7 +1,8 @@
+import asyncio
 import dataclasses
+import math
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
 from src.schemas.parsed_pdf import ParsedPDF
 from src.services.agent import (
     AgentErrorCategory,
+    AgentEvidenceCandidate,
     AgentExecutionStatus,
     AgentGraphConfig,
     AgentGraphDependencies,
@@ -29,6 +31,8 @@ from src.services.agent.query_rewriter import MAX_REWRITTEN_QUERY_CHARACTERS
 from src.services.arxiv.client import ArxivClient
 from src.services.chunking import PaperChunkingService
 from src.services.evidence import EvidenceContextBuilder
+from src.services.llm.base import LLMCompletion
+from src.services.rag import RAG_SYSTEM_PROMPT, RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
 
 S = AgentExecutionStatus
@@ -41,7 +45,12 @@ LOCAL_ONLY = AgentGraphConfig(live_fallback_enabled=False)
 
 GUARDRAIL_PASSED = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_PASSED]
 RETRIEVED = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
-SUFFICIENT_PATH = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT, S.GRAPH_COMPLETED]
+RERANKED = [S.EVIDENCE_RERANK_STARTED, S.EVIDENCE_RERANK_COMPLETED]
+GENERATION_TAIL = [*RERANKED, S.GENERATION_STARTED, S.GENERATION_COMPLETED, S.GRAPH_COMPLETED]
+RERANK_FAILED_TAIL = [S.EVIDENCE_RERANK_STARTED, S.GRAPH_FAILED]
+GENERATION_FAILED_TAIL = [*RERANKED, S.GENERATION_STARTED, S.GRAPH_FAILED]
+LOCAL_SUFFICIENT = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT]
+SUFFICIENT_PATH = [*LOCAL_SUFFICIENT, *GENERATION_TAIL]
 INSUFFICIENT_PATH = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT, S.GRAPH_COMPLETED]
 GRADER_FAILED_PATH = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.GRAPH_FAILED]
 REJECTED_PATH = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_REJECTED, S.GRAPH_COMPLETED]
@@ -50,7 +59,7 @@ RETRIEVAL_FAILED_PATH = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.GRAPH_F
 FIRST_INSUFFICIENT = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT]
 REWRITTEN_PATH = [*FIRST_INSUFFICIENT, S.QUERY_REWRITE_STARTED, S.QUERY_REWRITTEN]
 SECOND_RETRIEVED = [*REWRITTEN_PATH, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
-RETRY_SUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT, S.GRAPH_COMPLETED]
+RETRY_SUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT, *GENERATION_TAIL]
 RETRY_INSUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT, S.GRAPH_COMPLETED]
 REWRITE_FAILED_PATH = [*FIRST_INSUFFICIENT, S.QUERY_REWRITE_STARTED, S.GRAPH_FAILED]
 SECOND_RETRIEVAL_FAILED_PATH = [*REWRITTEN_PATH, S.LOCAL_RETRIEVAL_STARTED, S.GRAPH_FAILED]
@@ -61,7 +70,8 @@ LIVE_FAILED_PATH = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.GRAPH_FAILED]
 LIVE_SEARCHED = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.LIVE_FALLBACK_COMPLETED]
 LIVE_SELECTED = [*LIVE_SEARCHED, S.LIVE_SELECTION_STARTED, S.LIVE_SELECTION_COMPLETED]
 LIVE_DOCUMENT_TAIL = [S.LIVE_DOCUMENT_PROCESSING_STARTED, S.LIVE_DOCUMENT_PROCESSING_COMPLETED, S.GRAPH_COMPLETED]
-LIVE_EVIDENCE_PATH = [*LIVE_SELECTED, *LIVE_DOCUMENT_TAIL]
+LIVE_PROCESSED = [*LIVE_SELECTED, S.LIVE_DOCUMENT_PROCESSING_STARTED, S.LIVE_DOCUMENT_PROCESSING_COMPLETED]
+LIVE_EVIDENCE_PATH = [*LIVE_PROCESSED, *GENERATION_TAIL]
 LIVE_ZERO_SELECTED_PATH = [*LIVE_SELECTED, S.GRAPH_COMPLETED]
 LIVE_SELECTION_FAILED_PATH = [*LIVE_SEARCHED, S.LIVE_SELECTION_STARTED, S.GRAPH_FAILED]
 LIVE_DOCUMENTS_FAILED_PATH = [*LIVE_SELECTED, S.LIVE_DOCUMENT_PROCESSING_STARTED, S.GRAPH_FAILED]
@@ -69,21 +79,57 @@ SELECT_FIRST = '{"selected_arxiv_ids":["2501.00001"]}'
 SELECT_TWO = '{"selected_arxiv_ids":["2501.00001","2501.00002"]}'
 SELECT_NONE = '{"selected_arxiv_ids":[]}'
 CHUNK_TEXT = "private live chunk text"
+ANSWER = "Private generated synthesis [S1]."
 
 
 class FakeLLMProvider:
-    """Returns scripted completions in call order: guardrail, grader, rewrite, grader."""
+    """Scripted classifier completions in call order (guardrail, grader, rewrite, grader, selection).
 
-    def __init__(self, *responses: str | Exception) -> None:
+    Answer generation is recognised by the RAG system prompt and served from
+    ``answer`` so that scripts stay about routing decisions.
+    """
+
+    def __init__(self, *responses: str | Exception, answer: str | Exception = ANSWER) -> None:
         self.responses = list(responses or ('{"score":90}', '{"score":85}'))
+        self.answer = answer
         self.calls: list[tuple] = []
+        self.generation_calls: list[tuple] = []
 
     async def complete(self, messages, **kwargs):
-        response = self.responses[len(self.calls)]
-        self.calls.append((messages, kwargs))
+        if messages[0].content == RAG_SYSTEM_PROMPT:
+            self.generation_calls.append((messages, kwargs))
+            response = self.answer
+        else:
+            response = self.responses[len(self.calls)]
+            self.calls.append((messages, kwargs))
         if isinstance(response, Exception):
             raise response
-        return SimpleNamespace(content=response)
+        return LLMCompletion(content=response, model="fake-model", prompt_tokens=111, completion_tokens=22)
+
+
+class FakeEmbeddingProvider:
+    """Cosine to the query is the value of the first ``scores`` key found in a passage, else ``default``."""
+
+    def __init__(self, scores: dict[str, float] | None = None, *, default: float = 0.5, error=None) -> None:
+        self.scores = scores or {}
+        self.default = default
+        self.error = error
+        self.queries: list[str] = []
+        self.passage_batches: list[list[str]] = []
+
+    def embed_query(self, text: str) -> list[float]:
+        if self.error:
+            raise self.error
+        self.queries.append(text)
+        return [1.0, 0.0]
+
+    def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        self.passage_batches.append(list(texts))
+        vectors = []
+        for text in texts:
+            score = next((value for key, value in self.scores.items() if key in text), self.default)
+            vectors.append([score, math.sqrt(1 - score * score)])
+        return vectors
 
 
 def make_hit(chunk_id: str = "c1", text: str = EVIDENCE_TEXT) -> HybridSearchHit:
@@ -127,8 +173,8 @@ def make_chunk(paper: LiveArxivPaper, index: int = 0) -> TransientLiveEvidenceCh
         chunk_index=index,
         paper_title=paper.title,
         section_title="Private Section",
-        text=CHUNK_TEXT,
-        word_count=4,
+        text=f"{CHUNK_TEXT} {paper.arxiv_id[-1]} {index}",
+        word_count=6,
         authors=paper.authors,
         categories=paper.categories,
         published_date=paper.published_date,
@@ -166,6 +212,7 @@ def dependencies(
     live=None,
     live_error=None,
     processor=None,
+    embedding=None,
 ):
     """``results`` scripts successive search calls; an exception item is raised."""
     live_service = Mock()
@@ -176,10 +223,18 @@ def dependencies(
     retrieval = Mock(spec=HybridSearchService)
     retrieval.search.return_value = result or retrieval_result()
     retrieval.search.side_effect = results if results is not None else retrieval_error
+    context_builder = EvidenceContextBuilder(max_context_tokens=max_context_tokens)
     deps = AgentGraphDependencies(
         llm_provider=provider,
         hybrid_search_service=retrieval,
-        evidence_context_builder=EvidenceContextBuilder(max_context_tokens=max_context_tokens),
+        evidence_context_builder=context_builder,
+        embedding_provider=embedding or FakeEmbeddingProvider(),
+        rag_generation_service=RAGGenerationService(
+            llm_provider=provider,
+            evidence_builder=context_builder,
+            max_completion_tokens=64,
+            token_safety_margin=16,
+        ),
         live_search_service=live_service,
         live_document_processor=processor or fake_processor(),
     )
@@ -197,6 +252,7 @@ def statuses(result) -> list[AgentExecutionStatus]:
 def assert_no_downstream_progress(result) -> None:
     assert result["rewritten_query"] is None
     assert result["generated_answer"] is None
+    assert result["generation_result"] is None
     assert result["grounding_passed"] is None
     assert result["grounding_attempts"] == 0
     assert result["live_fallback_used"] is False
@@ -216,8 +272,9 @@ async def test_sufficient_path_grades_after_one_retrieval_and_completes() -> Non
     result = await run(deps, question, AgentGraphConfig(retrieval_size=7))
 
     assert statuses(result) == SUFFICIENT_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(8))
+    assert [event.sequence for event in result["execution_events"]] == list(range(12))
     assert len(provider.calls) == 2
+    assert len(provider.generation_calls) == 1
     retrieval.search.assert_called_once_with(question, size=7)
     assert result["retrieval_attempts"] == 1
     assert result["local_retrieval_result"] == expected
@@ -228,7 +285,16 @@ async def test_sufficient_path_grades_after_one_retrieval_and_completes() -> Non
     assert result["current_query"] == question
     assert result["terminal_reason"] is None
     assert result["error_category"] is None
-    assert_no_downstream_progress(result)
+    assert [candidate.source_type for candidate in result["final_evidence"]] == ["local"]
+    assert result["generated_answer"] == ANSWER
+    assert result["generation_result"].cited_labels == ("[S1]",)
+    assert result["grounding_passed"] is None
+    assert result["grounding_attempts"] == 0
+    assert result["rewritten_query"] is None
+    assert result["live_fallback_used"] is False
+    assert result["live_search_result"] is None
+    assert result["transient_live_evidence"] is None
+    deps.live_search_service.search.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -466,10 +532,18 @@ async def test_sync_retrieval_is_offloaded_without_timing_assertions() -> None:
     expected = retrieval_result()
     deps, _, retrieval = dependencies(result=expected)
 
-    with patch("src.services.agent.graph.asyncio.to_thread", new=AsyncMock(return_value=expected)) as offload:
+    real_to_thread = asyncio.to_thread
+
+    async def to_thread(function, *args, **kwargs):
+        if function is retrieval.search:
+            return expected
+        return await real_to_thread(function, *args, **kwargs)
+
+    with patch("src.services.agent.graph.asyncio.to_thread", new=AsyncMock(side_effect=to_thread)) as offload:
         result = await run(deps, "AI question")
 
-    offload.assert_awaited_once_with(retrieval.search, "AI question", size=5)
+    offload.assert_any_await(retrieval.search, "AI question", size=5)
+    assert [call.args[0] for call in offload.await_args_list].count(retrieval.search) == 1
     retrieval.search.assert_not_called()
     assert result["local_retrieval_result"] == expected
 
@@ -486,7 +560,7 @@ async def test_routing_uses_configured_guardrail_threshold(threshold: int, passe
     assert result["terminal_reason"] == (None if passed else TerminalReason.OUT_OF_SCOPE)
 
 
-def test_graph_compilation_has_conditional_m06_topology() -> None:
+def test_graph_compilation_has_conditional_m07_topology() -> None:
     deps, _, _ = dependencies()
 
     graph = build_agent_graph(dependencies=deps).get_graph()
@@ -502,6 +576,8 @@ def test_graph_compilation_has_conditional_m06_topology() -> None:
         "live_arxiv_search",
         "live_paper_selection",
         "live_document_processing",
+        "evidence_rerank",
+        "answer_generation",
         "insufficient_evidence",
         "graph_complete",
         "__end__",
@@ -515,7 +591,7 @@ def test_graph_compilation_has_conditional_m06_topology() -> None:
         ("out_of_scope", "__end__", False),
         ("local_retrieval", "evidence_grading", True),
         ("local_retrieval", "__end__", True),
-        ("evidence_grading", "graph_complete", True),
+        ("evidence_grading", "evidence_rerank", True),
         ("evidence_grading", "query_rewrite", True),
         ("evidence_grading", "__end__", True),
         ("query_rewrite", "local_retrieval", True),
@@ -526,7 +602,13 @@ def test_graph_compilation_has_conditional_m06_topology() -> None:
         ("live_paper_selection", "live_document_processing", True),
         ("live_paper_selection", "insufficient_evidence", True),
         ("live_paper_selection", "__end__", True),
-        ("live_document_processing", "graph_complete", True),
+        ("live_document_processing", "evidence_rerank", True),
+        ("evidence_rerank", "answer_generation", True),
+        ("evidence_rerank", "insufficient_evidence", True),
+        ("evidence_rerank", "__end__", True),
+        ("answer_generation", "graph_complete", True),
+        ("answer_generation", "insufficient_evidence", True),
+        ("answer_generation", "__end__", True),
         ("live_document_processing", "insufficient_evidence", True),
         ("live_document_processing", "__end__", True),
         ("live_arxiv_search", "insufficient_evidence", True),
@@ -580,7 +662,7 @@ async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_qu
     result = await run(deps, INDIA_QUESTION)
 
     assert statuses(result) == RETRY_SUFFICIENT_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(14))
+    assert [event.sequence for event in result["execution_events"]] == list(range(18))
     assert [call.args[0] for call in retrieval.search.call_args_list] == [INDIA_QUESTION, REWRITTEN]
     assert len(provider.calls) == 4
     guardrail_call, first_grade, rewrite, second_grade = provider.calls
@@ -601,9 +683,19 @@ async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_qu
     assert result["evidence_grade"] == EvidenceGrade(score=88, sufficient=True, source_count=2)
     assert result["terminal_reason"] is None
     assert result["error_category"] is None
-    assert result["generated_answer"] is None
     deps.live_search_service.search.assert_not_awaited()
-    assert_no_downstream_progress_after_rewrite(result)
+    deps.live_document_processor.process.assert_not_awaited()
+    assert result["live_fallback_used"] is False
+    assert result["transient_live_evidence"] is None
+    assert len(provider.generation_calls) == 1
+    assert [candidate.chunk_id for candidate in result["final_evidence"]] == ["b1", "b2"]
+    assert {candidate.source_type for candidate in result["final_evidence"]} == {"local"}
+    generation_prompt = user_payload(provider.generation_calls[0])
+    assert INDIA_QUESTION in generation_prompt
+    assert "attempt two evidence" in generation_prompt
+    assert "attempt one evidence" not in generation_prompt
+    assert result["generated_answer"] == ANSWER
+    assert result["grounding_passed"] is None
 
 
 @pytest.mark.anyio
@@ -636,7 +728,7 @@ async def test_attempt_metadata_distinguishes_first_and_second_attempts() -> Non
     result = await run(deps)
 
     metadata = [
-        (event.status, event.metadata.model_dump(exclude_none=True)) for event in result["execution_events"][3:14]
+        (event.status, event.metadata.model_dump(exclude_none=True)) for event in result["execution_events"][3:13]
     ]
     assert metadata == [
         (S.LOCAL_RETRIEVAL_STARTED, {"retrieval_attempt": 1}),
@@ -655,7 +747,6 @@ async def test_attempt_metadata_distinguishes_first_and_second_attempts() -> Non
             S.EVIDENCE_SUFFICIENT,
             {"retrieval_attempt": 2, "source_count": 2, "evidence_sufficient": True, "evidence_score": 88},
         ),
-        (S.GRAPH_COMPLETED, {}),
     ]
 
 
@@ -846,7 +937,7 @@ async def test_live_candidates_are_selected_processed_and_stored_as_transient_ev
     result = await run(deps, INDIA_QUESTION)
 
     assert statuses(result) == LIVE_EVIDENCE_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(20))
+    assert [event.sequence for event in result["execution_events"]] == list(range(24))
     assert S.GRAPH_COMPLETED not in statuses(result)[:-1]
     deps.live_search_service.search.assert_awaited_once_with(
         REWRITTEN, max_results=5, exclude_arxiv_ids=("2401.00001",)
@@ -874,9 +965,27 @@ async def test_live_candidates_are_selected_processed_and_stored_as_transient_ev
     assert result["terminal_reason"] is None
     assert result["error_category"] is None
     assert result["live_evidence"] is None
-    assert result["final_evidence"] is None
-    assert result["generated_answer"] is None
+    assert [(candidate.source_type, candidate.chunk_id) for candidate in result["final_evidence"]] == [
+        ("local", "b1"),
+        ("live_arxiv", "live::2501.00001::chunk::000"),
+        ("live_arxiv", "live::2501.00002::chunk::000"),
+    ]
+    assert len(provider.generation_calls) == 1
+    assert result["generated_answer"] == ANSWER
+    assert [source.label for source in result["generation_result"].sources] == ["[S1]", "[S2]", "[S3]"]
+    assert [source.source_type for source in result["generation_result"].sources] == [
+        "local",
+        "live_arxiv",
+        "live_arxiv",
+    ]
     assert result["grounding_passed"] is None
+    assert result["execution_events"][19:23] == result["execution_events"][-5:-1]
+    assert [event.metadata.model_dump(exclude_none=True) for event in result["execution_events"][19:23]] == [
+        {"local_candidate_count": 1, "live_candidate_count": 2, "merged_candidate_count": 3},
+        {"local_candidate_count": 1, "live_candidate_count": 2, "merged_candidate_count": 3, "final_source_count": 3},
+        {"final_source_count": 3},
+        {"final_source_count": 3, "prompt_tokens": 111, "completion_tokens": 22},
+    ]
     metadata = [event.metadata.model_dump(exclude_none=True) for event in result["execution_events"][13:19]]
     assert metadata == [
         {"live_fallback_used": True, "max_results": 5},
@@ -1179,7 +1288,9 @@ async def test_single_attempt_config_falls_back_live_with_unrewritten_query() ->
         S.LIVE_FALLBACK_COMPLETED,
         S.LIVE_SELECTION_STARTED,
         S.LIVE_SELECTION_COMPLETED,
-        *LIVE_DOCUMENT_TAIL,
+        S.LIVE_DOCUMENT_PROCESSING_STARTED,
+        S.LIVE_DOCUMENT_PROCESSING_COMPLETED,
+        *GENERATION_TAIL,
     ]
     assert deps.live_search_service.search.await_args.args == (INDIA_QUESTION,)
     assert len(provider.calls) == 3
@@ -1273,12 +1384,8 @@ async def test_live_search_is_never_reached_from_earlier_terminal_paths(llm: Fak
 
 
 def test_enabled_live_fallback_requires_a_live_search_service() -> None:
-    deps, provider, retrieval = dependencies()
-    without_live = AgentGraphDependencies(
-        llm_provider=provider,
-        hybrid_search_service=retrieval,
-        evidence_context_builder=deps.evidence_context_builder,
-    )
+    deps, _, _ = dependencies()
+    without_live = dataclasses.replace(deps, live_search_service=None, live_document_processor=None)
 
     with pytest.raises(ValueError, match="live_search_service is required"):
         build_agent_graph(dependencies=without_live)
@@ -1288,6 +1395,239 @@ def test_enabled_live_fallback_requires_a_live_search_service() -> None:
     graph = build_agent_graph(dependencies=without_live, config=LOCAL_ONLY).get_graph()
     assert not {"live_arxiv_search", "live_paper_selection", "live_document_processing"} & set(graph.nodes)
     assert "insufficient_evidence" in graph.nodes
+
+
+def final_ids(result) -> list[tuple[str, str]]:
+    return [(candidate.source_type, candidate.chunk_id) for candidate in result["final_evidence"]]
+
+
+@pytest.mark.anyio
+async def test_live_evidence_can_outrank_a_local_result_with_a_high_retrieval_score() -> None:
+    strong_local = make_hit("b1", "local evidence about healthcare AI methods").model_copy(
+        update={"rrf_score": 0.99, "bm25_score": 99.0, "vector_score": 0.99, "bm25_rank": 1, "vector_rank": 1}
+    )
+    first = retrieval_result(hits=[make_hit("a1", "attempt one evidence")])
+    second = retrieval_result(hits=[strong_local])
+    embedding = FakeEmbeddingProvider({"local evidence": 0.2, CHUNK_TEXT: 0.9})
+    llm = FakeLLMProvider('{"score":90}', '{"score":25}', REWRITE_JSON, '{"score":40}', SELECT_FIRST)
+    deps, provider, _ = dependencies(llm=llm, results=[first, second], embedding=embedding)
+
+    result = await run(deps, INDIA_QUESTION)
+
+    assert statuses(result) == LIVE_EVIDENCE_PATH
+    assert final_ids(result) == [("live_arxiv", "live::2501.00001::chunk::000"), ("local", "b1")]
+    assert [round(candidate.relevance_score, 6) for candidate in result["final_evidence"]] == [0.9, 0.2]
+    sources = result["generation_result"].sources
+    assert [(source.label, source.source_type) for source in sources] == [("[S1]", "live_arxiv"), ("[S2]", "local")]
+    assert sources[0].source_url == "https://arxiv.org/pdf/2501.00001"
+    assert sources[0].rrf_score is None
+    assert sources[1].source_url is None
+    prompt = user_payload(provider.generation_calls[0])
+    assert prompt.index("[S1] Private Live Title 2501.00001") < prompt.index("[S2] Private Paper Title")
+    assert embedding.queries == [INDIA_QUESTION]
+    assert len(embedding.passage_batches) == 1
+    assert embedding.passage_batches[0] == [
+        "Private Paper Title\nlocal evidence about healthcare AI methods",
+        f"Private Live Title 2501.00001\nPrivate Section\n{CHUNK_TEXT} 1 0",
+    ]
+    assert REWRITTEN not in embedding.queries
+
+
+@pytest.mark.anyio
+async def test_final_evidence_is_bounded_and_ordered_by_common_relevance() -> None:
+    hits = [make_hit(f"c{index}", f"local passage number {index}") for index in range(1, 5)]
+    embedding = FakeEmbeddingProvider({"number 1": 0.1, "number 2": 0.8, "number 3": 0.4, "number 4": 0.8})
+    deps, provider, _ = dependencies(result=retrieval_result(hits=hits), embedding=embedding)
+
+    result = await run(deps, config=AgentGraphConfig(final_evidence_max_sources=3))
+
+    assert final_ids(result) == [("local", "c2"), ("local", "c4"), ("local", "c3")]
+    assert [candidate.original_rank for candidate in result["final_evidence"]] == [2, 4, 3]
+    assert [source.chunk_id for source in result["generation_result"].sources] == ["c2", "c4", "c3"]
+    assert [source.label for source in result["generation_result"].sources] == ["[S1]", "[S2]", "[S3]"]
+    assert "number 1" not in user_payload(provider.generation_calls[0])
+    assert result["execution_events"][8].metadata.model_dump(exclude_none=True) == {
+        "local_candidate_count": 4,
+        "live_candidate_count": 0,
+        "merged_candidate_count": 4,
+        "final_source_count": 3,
+    }
+
+
+@pytest.mark.anyio
+async def test_cross_source_duplicate_content_keeps_the_local_representation() -> None:
+    shared = "shared passage found locally and live"
+    paper = make_live_paper("2401.00001")
+    duplicate = dataclasses.replace(make_chunk(paper), text="  Shared   passage found LOCALLY and live ")
+    distinct = dataclasses.replace(make_chunk(paper, 1), text="a different chunk of the same paper")
+    processor = Mock()
+    processor.process = AsyncMock(
+        return_value=LiveDocumentProcessingResult(chunks=(duplicate, distinct), selected_count=1, processed_count=1)
+    )
+    first = retrieval_result(hits=[make_hit("a1", "attempt one evidence")])
+    second = retrieval_result(hits=[make_hit("b1", shared)])
+    llm = FakeLLMProvider(
+        '{"score":90}', '{"score":25}', REWRITE_JSON, '{"score":40}', '{"selected_arxiv_ids":["2401.00001"]}'
+    )
+    deps, _, _ = dependencies(llm=llm, results=[first, second], live=live_result("2401.00001"), processor=processor)
+
+    result = await run(deps)
+
+    assert final_ids(result) == [("local", "b1"), ("live_arxiv", "live::2401.00001::chunk::001")]
+    assert result["transient_live_evidence"] == (duplicate, distinct)
+    assert result["execution_events"][20].metadata.model_dump(exclude_none=True) == {
+        "local_candidate_count": 1,
+        "live_candidate_count": 2,
+        "merged_candidate_count": 2,
+        "final_source_count": 2,
+    }
+
+
+@pytest.mark.anyio
+async def test_source_specific_state_is_preserved_alongside_final_evidence() -> None:
+    candidates = live_result("2501.00001", "2501.00002")
+    deps, _, _, second = exhausted_dependencies(live=candidates, selection=SELECT_TWO)
+
+    result = await run(deps)
+
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_grade"] == EvidenceGrade(score=40, sufficient=False, source_count=1)
+    assert result["evidence_sufficient"] is False
+    assert result["live_search_result"] == candidates
+    assert result["live_selected_papers"] == candidates.candidates
+    assert result["transient_live_evidence"] == tuple(make_chunk(paper) for paper in candidates.candidates)
+    assert all(isinstance(candidate, AgentEvidenceCandidate) for candidate in result["final_evidence"])
+    assert result["generation_result"].answer == result["generated_answer"] == ANSWER
+    assert (result["generation_result"].model, result["generation_result"].prompt_tokens) == ("fake-model", 111)
+    assert result["generation_result"].completion_tokens == 22
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    assert result["grounding_passed"] is None
+    assert result["grounding_attempts"] == 0
+
+
+@pytest.mark.anyio
+async def test_no_usable_final_evidence_is_insufficient_without_generation() -> None:
+    hit = make_hit("c1", "   ")
+    deps, provider, _ = dependencies(result=retrieval_result(hits=[hit]))
+    grader = Mock()
+    grader.grade = AsyncMock(return_value=EvidenceGrade(score=90, sufficient=True, source_count=1))
+
+    with patch("src.services.agent.graph.EvidenceSufficiencyGrader", return_value=grader):
+        result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *RERANKED, S.GRAPH_COMPLETED]
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert result["final_evidence"] == ()
+    assert provider.generation_calls == []
+    assert deps.embedding_provider.queries == []
+    assert result["generated_answer"] is None
+    assert result["generation_result"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+    assert result["execution_events"][8].metadata.final_source_count == 0
+
+
+@pytest.mark.anyio
+async def test_evidence_that_cannot_fit_the_context_budget_is_insufficient_not_failure() -> None:
+    deps, provider, _ = dependencies()
+    tiny = dataclasses.replace(deps, evidence_context_builder=EvidenceContextBuilder(max_context_tokens=1))
+    grader = Mock()
+    grader.grade = AsyncMock(return_value=EvidenceGrade(score=90, sufficient=True, source_count=1))
+
+    with patch("src.services.agent.graph.EvidenceSufficiencyGrader", return_value=grader):
+        result = await run(tiny)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *RERANKED, S.GENERATION_STARTED, S.GRAPH_COMPLETED]
+    assert provider.generation_calls == []
+    assert result["generated_answer"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("live_path", [False, True])
+async def test_rerank_failure_is_distinct_from_insufficient_evidence(live_path: bool) -> None:
+    embedding = FakeEmbeddingProvider(error=RuntimeError("private embedding detail"))
+    if live_path:
+        deps, provider, _, _ = exhausted_dependencies()
+        deps = dataclasses.replace(deps, embedding_provider=embedding)
+        expected = [*LIVE_PROCESSED, *RERANK_FAILED_TAIL]
+    else:
+        deps, provider, _ = dependencies(embedding=embedding)
+        expected = [*LOCAL_SUFFICIENT, *RERANK_FAILED_TAIL]
+
+    result = await run(deps)
+
+    assert statuses(result) == expected
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert provider.generation_calls == []
+    assert result["final_evidence"] is None
+    assert result["generated_answer"] is None
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.EVIDENCE_RERANK_FAILURE
+    assert "private embedding detail" not in repr(
+        {key: value for key, value in result.items() if key != "local_retrieval_result"}
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        RuntimeError("private generation detail"),
+        "Private generation detail cites an unknown source [S9].",
+        "Private generation detail cites nothing at all.",
+        "Private generation detail uses a malformed label [S0].",
+        "Private generation detail uses a malformed label [S 1].",
+    ],
+)
+async def test_generation_provider_and_structural_validation_failures_are_controlled(answer) -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATION_FAILED_TAIL]
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert S.GROUNDING_STARTED not in statuses(result)
+    assert len(provider.generation_calls) == 1
+    assert result["final_evidence"] is not None
+    assert result["generated_answer"] is None
+    assert result["generation_result"] is None
+    assert result["grounding_passed"] is None
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.GENERATION_FAILURE
+    serialized = repr({key: value for key, value in result.items() if key != "local_retrieval_result"})
+    assert "rivate generation detail" not in serialized
+
+
+@pytest.mark.anyio
+async def test_citation_free_insufficiency_answer_is_a_valid_generation() -> None:
+    answer = "The available evidence is insufficient to answer the question."
+    deps, _, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))
+
+    result = await run(deps)
+
+    assert statuses(result) == SUFFICIENT_PATH
+    assert result["generated_answer"] == answer
+    assert result["generation_result"].cited_labels == ()
+    assert result["terminal_reason"] is None
+
+
+@pytest.mark.anyio
+async def test_generation_runs_once_and_reuses_the_existing_rag_prompt_and_limits() -> None:
+    deps, provider, _ = dependencies()
+
+    result = await run(deps, "How is NLP used in clinical decision support?")
+
+    assert len(provider.generation_calls) == 1
+    messages, kwargs = provider.generation_calls[0]
+    assert messages[0].content == RAG_SYSTEM_PROMPT
+    assert "BEGIN USER QUESTION (untrusted data)\nHow is NLP used in clinical decision support?" in messages[1].content
+    assert f"[S1] Private Paper Title\narXiv ID: 2401.00001\nChunk ID: c1\nEvidence: {EVIDENCE_TEXT}" in messages[1].content
+    assert kwargs == {"temperature": 0.1, "max_tokens": 64}
+    assert result["generation_result"].retrieval_mode == "hybrid"
+    assert statuses(result).count(S.GENERATION_STARTED) == 1
 
 
 def scenario_dependencies():
@@ -1315,6 +1655,9 @@ def scenario_dependencies():
         (exhausted_dependencies(processor=fake_processor(unusable={"2501.00001"}))[0], None),
         (exhausted_dependencies(processor=fake_processor(failing={"2501.00001"}))[0], None),
         (exhausted_dependencies(processor=fake_processor(error=RuntimeError("down")))[0], None),
+        (dependencies(embedding=FakeEmbeddingProvider(error=RuntimeError("down")))[0], None),
+        (dependencies(llm=FakeLLMProvider(answer=RuntimeError("down")))[0], None),
+        (dependencies(llm=FakeLLMProvider(answer="No citation here."))[0], None),
     ]
 
 
@@ -1331,6 +1674,11 @@ async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequence
         assert path.count(S.LIVE_FALLBACK_STARTED) <= 1
         assert path.count(S.LIVE_SELECTION_STARTED) <= 1
         assert path.count(S.LIVE_DOCUMENT_PROCESSING_STARTED) <= 1
+        assert path.count(S.EVIDENCE_RERANK_STARTED) <= 1
+        assert path.count(S.GENERATION_STARTED) <= 1
+        assert (S.GENERATION_COMPLETED in path) == (result["generated_answer"] is not None)
+        assert S.GROUNDING_STARTED not in path
+        assert result["grounding_passed"] is None
         assert result["retrieval_attempts"] <= 2
 
 
@@ -1376,6 +1724,12 @@ async def test_events_are_deterministic_and_content_free(responses: tuple[str, .
         "Private Section",
         "UNTRUSTED_SELECTION_INPUT_JSON",
         "research-paper selector",
+        ANSWER,
+        "Private generated synthesis",
+        "research assistant",
+        "BEGIN RETRIEVED EVIDENCE",
+        "fake-model",
+        "relevance_score",
         "UNTRUSTED_QUESTION_JSON",
         "UNTRUSTED_GRADING_INPUT_JSON",
         "UNTRUSTED_REWRITE_INPUT_JSON",

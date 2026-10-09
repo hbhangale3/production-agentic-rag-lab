@@ -30,6 +30,12 @@ def test_execution_event_has_deterministic_representation() -> None:
             "processed_count": None,
             "failed_count": None,
             "transient_chunk_count": None,
+            "local_candidate_count": None,
+            "live_candidate_count": None,
+            "merged_candidate_count": None,
+            "final_source_count": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
             "guardrail_passed": None,
             "guardrail_score": None,
             "evidence_sufficient": None,
@@ -122,3 +128,34 @@ def test_live_selection_and_processing_vocabulary_is_distinct() -> None:
     assert AgentExecutionStatus.LIVE_DOCUMENT_PROCESSING_COMPLETED.value == "live_document_processing_completed"
     assert AgentErrorCategory.LIVE_SELECTION_FAILURE.value == "live_selection_failure"
     assert AgentErrorCategory.LIVE_DOCUMENT_PROCESSING_FAILURE.value == "live_document_processing_failure"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "local_candidate_count",
+        "live_candidate_count",
+        "merged_candidate_count",
+        "final_source_count",
+        "prompt_tokens",
+        "completion_tokens",
+    ],
+)
+def test_rerank_and_generation_metadata_is_count_only(field: str) -> None:
+    assert getattr(AgentExecutionMetadata(**{field: 0}), field) == 0
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(**{field: -1})
+
+
+def test_rerank_and_generation_metadata_rejects_content_and_scores() -> None:
+    for forbidden in ("answer", "model", "relevance_score", "embedding", "source_url"):
+        with pytest.raises(ValidationError):
+            AgentExecutionMetadata(**{forbidden: "private"})
+
+
+def test_rerank_vocabulary_is_distinct_from_grading_and_generation() -> None:
+    assert AgentExecutionStatus.EVIDENCE_RERANK_STARTED.value == "evidence_rerank_started"
+    assert AgentExecutionStatus.EVIDENCE_RERANK_COMPLETED.value == "evidence_rerank_completed"
+    assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE.value == "evidence_rerank_failure"
+    assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE is not AgentErrorCategory.EVIDENCE_GRADING_FAILURE
+    assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE is not AgentErrorCategory.GENERATION_FAILURE

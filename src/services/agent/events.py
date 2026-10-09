@@ -26,6 +26,8 @@ class AgentExecutionStatus(StrEnum):
     LIVE_SELECTION_COMPLETED = "live_selection_completed"
     LIVE_DOCUMENT_PROCESSING_STARTED = "live_document_processing_started"
     LIVE_DOCUMENT_PROCESSING_COMPLETED = "live_document_processing_completed"
+    EVIDENCE_RERANK_STARTED = "evidence_rerank_started"
+    EVIDENCE_RERANK_COMPLETED = "evidence_rerank_completed"
     GENERATION_STARTED = "generation_started"
     GENERATION_COMPLETED = "generation_completed"
     GROUNDING_STARTED = "grounding_started"
@@ -50,6 +52,12 @@ class AgentExecutionMetadata(BaseModel):
     processed_count: int | None = Field(default=None, ge=0)
     failed_count: int | None = Field(default=None, ge=0)
     transient_chunk_count: int | None = Field(default=None, ge=0)
+    local_candidate_count: int | None = Field(default=None, ge=0)
+    live_candidate_count: int | None = Field(default=None, ge=0)
+    merged_candidate_count: int | None = Field(default=None, ge=0)
+    final_source_count: int | None = Field(default=None, ge=0)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
     guardrail_passed: bool | None = None
     guardrail_score: int | None = Field(default=None, ge=0, le=100)
     evidence_sufficient: bool | None = None

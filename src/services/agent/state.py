@@ -6,10 +6,12 @@ from typing import Annotated, TypedDict
 
 from src.schemas.hybrid_search import HybridSearchResult
 from src.services.agent.events import AgentExecutionEvent
+from src.services.agent.final_evidence import AgentEvidenceCandidate
 from src.services.agent.live_documents import TransientLiveEvidenceChunk
 from src.services.agent.live_search import LiveArxivPaper, LiveArxivSearchResult
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 from src.services.evidence import EvidenceSource
+from src.services.rag.service import RAGGenerationResult
 
 
 @dataclass(frozen=True)
@@ -47,7 +49,8 @@ class AgentState(TypedDict):
     live_selected_papers: tuple[LiveArxivPaper, ...] | None
     transient_live_evidence: tuple[TransientLiveEvidenceChunk, ...] | None
     live_evidence: tuple[EvidenceSource, ...] | None
-    final_evidence: tuple[EvidenceSource, ...] | None
+    final_evidence: tuple[AgentEvidenceCandidate, ...] | None
+    generation_result: RAGGenerationResult | None
     generated_answer: str | None
     grounding_passed: bool | None
     grounding_attempts: int
@@ -77,6 +80,7 @@ def create_initial_agent_state(question: str) -> AgentState:
         transient_live_evidence=None,
         live_evidence=None,
         final_evidence=None,
+        generation_result=None,
         generated_answer=None,
         grounding_passed=None,
         grounding_attempts=0,
