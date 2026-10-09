@@ -56,6 +56,7 @@ class Settings(DefaultSettings):
     llm_max_completion_tokens: int = Field(default=512, gt=0)
     llm_context_window_tokens: int = Field(default=8192, gt=0)
     llm_token_safety_margin: int = Field(default=256, ge=0)
+    rag_retrieval_size: int = Field(default=5, gt=0, le=100)
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"

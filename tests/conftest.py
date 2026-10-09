@@ -3,7 +3,7 @@
 import pytest
 from polyfactory.factories.pydantic_factory import ModelFactory
 from src.config import Settings
-from src.schemas.ask import AskRequest, PaperSource
+from src.schemas.ask import AskRequest
 from src.schemas.paper import PaperCreate, PaperResponse
 
 
@@ -22,9 +22,6 @@ class PaperResponseFactory(ModelFactory[PaperResponse]): ...
 class AskRequestFactory(ModelFactory[AskRequest]): ...
 
 
-class PaperSourceFactory(ModelFactory[PaperSource]): ...
-
-
 @pytest.fixture
 def paper_create_data() -> PaperCreate:
     """Mock paper creation data."""
@@ -41,9 +38,3 @@ def paper_response_data() -> PaperResponse:
 def ask_request_data() -> AskRequest:
     """Mock ask request data."""
     return AskRequestFactory.build()
-
-
-@pytest.fixture
-def paper_source_data() -> PaperSource:
-    """Mock paper source data."""
-    return PaperSourceFactory.build()

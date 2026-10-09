@@ -5,11 +5,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from src.config import get_settings
 from src.db.factory import make_database
+from src.exceptions import LLMConfigurationError
 
 # Week 1: No complex middleware needed
 from src.routers import ask, hybrid_search, papers, ping, search
 from src.services.embeddings.factory import make_embedding_provider
+from src.services.evidence import EvidenceContextBuilder
+from src.services.llm.factory import make_llm_provider
 from src.services.opensearch.factory import make_chunk_index_manager
+from src.services.rag import RAGGenerationService
 from src.services.search.chunk_bm25_service import ChunkBM25SearchService
 from src.services.search.hybrid_service import HybridSearchService
 from src.services.search.vector_service import VectorSearchService
@@ -35,10 +39,9 @@ async def lifespan(app: FastAPI):
     app.state.database = database
     logger.info("Database connected")
 
-    # Placeholders for future weeks
+    # Placeholders retained for services not yet integrated.
     app.state.pdf_parser_service = None
     app.state.opensearch_service = None
-    app.state.llm_service = None
 
     chunk_index = make_chunk_index_manager(settings)
     embedding_provider = make_embedding_provider(settings)
@@ -59,12 +62,29 @@ async def lifespan(app: FastAPI):
         max_results=settings.vector_search_max_results,
     )
 
+    llm_provider = None
+    app.state.llm_provider = None
+    app.state.rag_generation_service = None
+    try:
+        llm_provider = make_llm_provider(settings)
+    except LLMConfigurationError:
+        logger.warning("Language model service is not configured; /ask is unavailable")
+    else:
+        app.state.llm_provider = llm_provider
+        app.state.rag_generation_service = RAGGenerationService.from_settings(
+            llm_provider=llm_provider,
+            evidence_builder=EvidenceContextBuilder.from_settings(settings),
+            settings=settings,
+        )
+
     logger.info("API ready")
     yield
 
     # Cleanup
     database.teardown()
     chunk_index.close()
+    if llm_provider is not None:
+        await llm_provider.close()
     logger.info("API shutdown complete")
 
 

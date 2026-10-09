@@ -229,6 +229,21 @@ async def test_unknown_citation_is_rejected_without_inventing_source_mapping() -
 
 
 @pytest.mark.anyio
+async def test_fullwidth_provider_citations_are_canonicalized_and_validated() -> None:
+    provider = FakeLLMProvider(
+        completion=LLMCompletion(content="Supported claim 【S1】.", model="fake-model")
+    )
+
+    result = await service(provider).generate(
+        question="Question",
+        retrieval_result=retrieval(hit("chunk", "Evidence")),
+    )
+
+    assert result.answer == "Supported claim [S1]."
+    assert result.cited_labels == ("[S1]",)
+
+
+@pytest.mark.anyio
 async def test_answer_without_citations_is_retained_for_insufficiency_language() -> None:
     provider = FakeLLMProvider(
         completion=LLMCompletion(

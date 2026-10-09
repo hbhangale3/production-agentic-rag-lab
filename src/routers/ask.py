@@ -1,33 +1,74 @@
-from fastapi import APIRouter
-from src.schemas.ask import AskRequest, AskResponse, PaperSource
+from functools import partial
+
+from fastapi import APIRouter, HTTPException, status
+from src.dependencies import HybridSearchServiceDep, RAGGenerationServiceDep, RequestSettingsDep
+from src.exceptions import (
+    HybridSearchError,
+    InsufficientEvidenceError,
+    LLMConfigurationError,
+    LLMRequestError,
+    LLMResponseError,
+    RAGPromptBudgetError,
+)
+from src.schemas.ask import AskRequest, AskResponse, build_ask_response
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
 
 @router.post("/ask", response_model=AskResponse)
-async def ask_question(request: AskRequest) -> AskResponse:
-    """
-    Mock implementation for question answering endpoint.
-
-    Week 1: Returns hardcoded mock data for testing.
-    """
-    # Mock response for week 1
-    mock_sources = [
-        PaperSource(
-            arxiv_id="2401.00001",
-            title="Mock Paper: Introduction to AI Research",
-            authors=["John Doe", "Jane Smith"],
-            abstract_preview="This is a mock abstract for testing purposes in week 1...",
-        ),
-        PaperSource(
-            arxiv_id="2401.00002",
-            title="Mock Paper: Advanced Machine Learning Techniques",
-            authors=["Alice Johnson", "Bob Wilson"],
-            abstract_preview="Another mock abstract demonstrating the API structure...",
-        ),
-    ]
-
-    return AskResponse(
-        answer="This is a mock response for week 1. Real search functionality will be implemented in later phases.",
-        sources=mock_sources,
+async def ask_question(
+    request: AskRequest,
+    hybrid_service: HybridSearchServiceDep,
+    rag_service: RAGGenerationServiceDep,
+    settings: RequestSettingsDep,
+) -> AskResponse:
+    """Retrieve ranked evidence and generate one grounded research answer."""
+    search = partial(
+        hybrid_service.search,
+        request.question,
+        size=settings.rag_retrieval_size,
     )
+    try:
+        retrieval_result = await run_in_threadpool(search)
+    except HybridSearchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Research retrieval is temporarily unavailable.",
+        ) from exc
+
+    try:
+        generation = await rag_service.generate(
+            question=request.question,
+            retrieval_result=retrieval_result,
+        )
+    except InsufficientEvidenceError:
+        return AskResponse(
+            answer="The available indexed evidence is insufficient to answer this question.",
+            sources=[],
+            retrieval_mode=retrieval_result.retrieval_mode,
+            model=None,
+            prompt_tokens=None,
+            completion_tokens=None,
+        )
+    except RAGPromptBudgetError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The question and retrieved evidence exceed the generation budget.",
+        ) from exc
+    except LLMConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Language model service is not configured.",
+        ) from exc
+    except LLMRequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Language model service is temporarily unavailable.",
+        ) from exc
+    except LLMResponseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Language model service returned an unusable response.",
+        ) from exc
+    return build_ask_response(generation)

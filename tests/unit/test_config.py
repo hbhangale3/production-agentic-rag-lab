@@ -69,6 +69,7 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
     assert settings.llm_max_completion_tokens == 512
     assert settings.llm_context_window_tokens == 8192
     assert settings.llm_token_safety_margin == 256
+    assert settings.rag_retrieval_size == 5
 
 
 @pytest.mark.parametrize(
@@ -84,6 +85,8 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
         ("llm_max_completion_tokens", 0),
         ("llm_context_window_tokens", 0),
         ("llm_token_safety_margin", -1),
+        ("rag_retrieval_size", 0),
+        ("rag_retrieval_size", 101),
     ],
 )
 def test_invalid_week5_llm_settings_are_rejected(field: str, value: Any) -> None:

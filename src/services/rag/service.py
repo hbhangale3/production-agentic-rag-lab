@@ -8,6 +8,7 @@ from src.services.llm.base import LLMProvider
 from src.services.rag.prompt import RAGPromptBuilder
 
 CITATION_LABEL = re.compile(r"\[S\d+\]")
+FULLWIDTH_CITATION_LABEL = re.compile(r"【S(\d+)】")
 
 
 @dataclass(frozen=True)
@@ -113,13 +114,14 @@ class RAGGenerationService:
             temperature=self.temperature,
             max_tokens=self.max_completion_tokens,
         )
-        cited_labels = tuple(dict.fromkeys(CITATION_LABEL.findall(completion.content)))
+        answer = FULLWIDTH_CITATION_LABEL.sub(r"[S\1]", completion.content)
+        cited_labels = tuple(dict.fromkeys(CITATION_LABEL.findall(answer)))
         available_labels = {source.label for source in evidence.sources}
         if any(label not in available_labels for label in cited_labels):
             raise LLMResponseError("LLM answer contained an unsupported citation label")
 
         return RAGGenerationResult(
-            answer=completion.content,
+            answer=answer,
             sources=evidence.sources,
             retrieval_mode=evidence.retrieval_mode,
             model=completion.model,

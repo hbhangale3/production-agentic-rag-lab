@@ -37,20 +37,11 @@ class AskSource(BaseModel):
     published_date: datetime | None = None
 
 
-class PaperSource(BaseModel):
-    """Temporary Week 1 mock source contract retained until M05 route wiring."""
-
-    arxiv_id: str = Field(description="arXiv paper ID")
-    title: str = Field(description="Paper title")
-    authors: list[str] = Field(description="List of paper authors")
-    abstract_preview: str = Field(description="Preview of paper abstract")
-
-
 class AskResponse(BaseModel):
-    """Public answer contract with temporary support for Week 1 mock sources."""
+    """Public grounded answer contract."""
 
     answer: str
-    sources: list[AskSource | PaperSource]
+    sources: list[AskSource]
     retrieval_mode: Literal["hybrid", "bm25_fallback", "vector_fallback"] | None = None
     model: str | None = None
     prompt_tokens: int | None = Field(default=None, ge=0)

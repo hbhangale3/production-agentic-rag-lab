@@ -1,13 +1,14 @@
 from functools import lru_cache
 from typing import Annotated, Generator
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request, status
 
 # Week 1: Removed API key authentication for simplicity
 from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.interfaces.base import BaseDatabase
 from src.services.opensearch.factory import make_opensearch_client
+from src.services.rag import RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
 from src.services.search.paper_service import PaperSearchService
 
@@ -61,20 +62,24 @@ def get_hybrid_search_service(request: Request) -> HybridSearchService:
     return request.app.state.hybrid_search_service
 
 
-# Phase 3: LLM service (skeleton only)
-def get_llm_service(request: Request):
-    """Get LLM service from app state (Phase 3 - not implemented yet)."""
-    # Phase 3: Will return actual LLM service
-    return None
+def get_rag_generation_service(request: Request) -> RAGGenerationService:
+    """Return the worker-scoped RAG service or a safe configuration failure."""
+    service = request.app.state.rag_generation_service
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Language model service is not configured.",
+        )
+    return service
 
 
 # Dependency type aliases for better type hints
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+RequestSettingsDep = Annotated[Settings, Depends(get_request_settings)]
 DatabaseDep = Annotated[BaseDatabase, Depends(get_database)]
 SessionDep = Annotated[Session, Depends(get_db_session)]
 PDFParserServiceDep = Annotated[object, Depends(get_pdf_parser_service)]
 OpenSearchServiceDep = Annotated[object, Depends(get_opensearch_service)]
 PaperSearchServiceDep = Annotated[PaperSearchService, Depends(get_paper_search_service)]
 HybridSearchServiceDep = Annotated[HybridSearchService, Depends(get_hybrid_search_service)]
-# Phase 3: LLM service dependency (not used in Phase 2)
-# LLMServiceDep = Annotated[object, Depends(get_llm_service)]
+RAGGenerationServiceDep = Annotated[RAGGenerationService, Depends(get_rag_generation_service)]

@@ -24,22 +24,3 @@ async def test_health(client):
 
     assert body["status"] == "ok"
     assert body["services"]["database"]["status"] == "healthy"
-
-
-@pytest.mark.anyio
-async def test_ask_returns_week1_mock_response(client):
-    """Week 1 ask endpoint should return the expected mock contract."""
-    response = await client.post(
-        "/api/v1/ask",
-        json={"question": "What is retrieval augmented generation?"},
-    )
-
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert "mock response for week 1" in body["answer"].lower()
-    assert len(body["sources"]) == 2
-
-    assert body["sources"][0]["arxiv_id"] == "2401.00001"
-    assert body["sources"][1]["arxiv_id"] == "2401.00002"
