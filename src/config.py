@@ -61,6 +61,7 @@ class Settings(DefaultSettings):
     # Week 6 optional exact-response cache infrastructure
     redis_enabled: bool = False
     redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
+    redis_health_timeout_seconds: float = Field(default=1.0, gt=0, le=10)
     rag_cache_ttl_seconds: int = Field(default=86_400, gt=0)
     rag_corpus_generation: str = "corpus-v1"
 

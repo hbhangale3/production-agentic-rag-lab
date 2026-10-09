@@ -115,6 +115,7 @@ def test_week6_redis_defaults_are_optional_and_secret_safe() -> None:
 
     assert settings.redis_enabled is False
     assert settings.redis_url.get_secret_value() == "redis://127.0.0.1:6379/0"
+    assert settings.redis_health_timeout_seconds == 1.0
     assert settings.rag_cache_ttl_seconds == 86_400
     assert settings.rag_corpus_generation == "corpus-v1"
     assert "redis://127.0.0.1:6379/0" not in repr(settings)
@@ -136,6 +137,12 @@ def test_enabled_redis_configuration_is_valid_without_connecting() -> None:
 def test_cache_ttl_must_be_positive(ttl: int) -> None:
     with pytest.raises(ValidationError):
         make_settings(rag_cache_ttl_seconds=ttl)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 10.1])
+def test_redis_health_timeout_is_small_and_positive(timeout: float) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(redis_health_timeout_seconds=timeout)
 
 
 def test_enabled_redis_requires_nonblank_url() -> None:

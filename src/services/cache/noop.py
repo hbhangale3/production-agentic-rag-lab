@@ -1,4 +1,4 @@
-from src.services.cache.base import CacheHealth
+from src.services.cache.base import CacheHealth, CacheReadResult, CacheReadStatus
 
 
 class NoOpCache:
@@ -9,6 +9,10 @@ class NoOpCache:
 
     async def get(self, key: str) -> None:
         return None
+
+    async def get_result(self, key: str) -> CacheReadResult:
+        status = CacheReadStatus.FAILURE if self.status is CacheHealth.UNAVAILABLE else CacheReadStatus.MISS
+        return CacheReadResult(status)
 
     async def set(self, key: str, value: str, *, ttl_seconds: int) -> bool:
         return False

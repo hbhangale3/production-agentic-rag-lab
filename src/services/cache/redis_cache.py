@@ -3,7 +3,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from src.services.cache.base import CacheHealth
+from src.services.cache.base import CacheHealth, CacheReadResult, CacheReadStatus
 
 logger = logging.getLogger(__name__)
 
@@ -17,26 +17,29 @@ class RedisCache:
         self._closed = False
 
     async def get(self, key: str) -> str | None:
+        return (await self.get_result(key)).value
+
+    async def get_result(self, key: str) -> CacheReadResult:
         self._validate_key(key)
         if self._closed:
-            return None
+            return CacheReadResult(CacheReadStatus.FAILURE)
         try:
             value = await self._client.get(key)
         except RedisError:
             logger.warning("Redis cache GET failed; treating operation as a cache miss")
-            return None
+            return CacheReadResult(CacheReadStatus.FAILURE)
         if value is None:
-            return None
+            return CacheReadResult(CacheReadStatus.MISS)
         if isinstance(value, str):
-            return value
+            return CacheReadResult(CacheReadStatus.HIT, value)
         if isinstance(value, bytes):
             try:
-                return value.decode("utf-8")
+                return CacheReadResult(CacheReadStatus.HIT, value.decode("utf-8"))
             except UnicodeDecodeError:
                 logger.warning("Redis cache GET returned a non-UTF-8 value; treating operation as a cache miss")
-                return None
+                return CacheReadResult(CacheReadStatus.MISS)
         logger.warning("Redis cache GET returned an unsupported value; treating operation as a cache miss")
-        return None
+        return CacheReadResult(CacheReadStatus.MISS)
 
     async def set(self, key: str, value: str, *, ttl_seconds: int) -> bool:
         self._validate_key(key)

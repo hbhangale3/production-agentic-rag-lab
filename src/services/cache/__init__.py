@@ -1,6 +1,6 @@
 """Provider-neutral asynchronous cache infrastructure."""
 
-from src.services.cache.base import AsyncCache, CacheHealth
+from src.services.cache.base import AsyncCache, CacheHealth, CacheReadResult, CacheReadStatus
 from src.services.cache.factory import make_cache
 from src.services.cache.noop import NoOpCache
 from src.services.cache.rag_contract import (
@@ -19,10 +19,15 @@ from src.services.cache.rag_contract import (
 )
 from src.services.cache.rag_response_cache import RAGCacheLookup, RAGResponseCacheCoordinator
 from src.services.cache.redis_cache import RedisCache
+from src.services.cache.stats import CacheStats, CacheStatsSnapshot
 
 __all__ = [
     "AsyncCache",
     "CacheHealth",
+    "CacheReadResult",
+    "CacheReadStatus",
+    "CacheStats",
+    "CacheStatsSnapshot",
     "ConfiguredCorpusFingerprintProvider",
     "NoOpCache",
     "RAG_CACHE_SCHEMA_VERSION",

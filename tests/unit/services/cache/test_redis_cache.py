@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
-from src.services.cache import CacheHealth, RedisCache
+from src.services.cache import CacheHealth, CacheReadStatus, RedisCache
 
 
 def cache(*, owns_client: bool = False):
@@ -23,6 +23,15 @@ async def test_get_hit_miss_and_utf8_bytes() -> None:
     assert await instance.get("hit") == "héllo 世界"
     assert await instance.get("miss") is None
     assert await instance.get("bytes") == "bytes"
+
+
+@pytest.mark.anyio
+async def test_structured_read_result_distinguishes_miss_from_backend_failure() -> None:
+    instance, client = cache()
+    client.get.side_effect = [None, RedisConnectionError("unavailable")]
+
+    assert (await instance.get_result("miss")).status is CacheReadStatus.MISS
+    assert (await instance.get_result("failure")).status is CacheReadStatus.FAILURE
 
 
 @pytest.mark.anyio

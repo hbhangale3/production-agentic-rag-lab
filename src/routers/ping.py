@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 from sqlalchemy import text
-
-from ..dependencies import DatabaseDep, SettingsDep
-from ..schemas.health import HealthResponse, ServiceStatus
+from src.dependencies import DatabaseDep, RAGResponseCacheDep, SettingsDep
+from src.schemas.health import CacheOperationalStatus, HealthResponse, ServiceStatus
+from src.services.cache import RAG_CACHE_SCHEMA_VERSION
 
 router = APIRouter()
 
@@ -21,7 +21,11 @@ async def ping():
     response_description="Service health information",
     tags=["Health"],
 )
-async def health_check(settings: SettingsDep, database: DatabaseDep) -> HealthResponse:
+async def health_check(
+    settings: SettingsDep,
+    database: DatabaseDep,
+    response_cache: RAGResponseCacheDep,
+) -> HealthResponse:
     """
     Comprehensive health check endpoint for monitoring and load balancer probes.
 
@@ -58,10 +62,28 @@ async def health_check(settings: SettingsDep, database: DatabaseDep) -> HealthRe
         services["database"] = ServiceStatus(status="unhealthy", message=f"Connection failed: {str(e)}")
         overall_status = "degraded"
 
+    cache_status = await response_cache.health()
+    cache_stats = response_cache.stats_snapshot()
+
     return HealthResponse(
         status=overall_status,
         version=settings.app_version,
         environment=settings.environment,
         service_name=settings.service_name,
         services=services,
+        cache=CacheOperationalStatus(
+            enabled=response_cache.enabled,
+            status=cache_status.value,
+            backend="redis" if response_cache.enabled else "disabled",
+            ttl_seconds=response_cache.ttl_seconds,
+            schema_version=RAG_CACHE_SCHEMA_VERSION,
+            hits=cache_stats.hits,
+            misses=cache_stats.misses,
+            bypasses=cache_stats.bypasses,
+            writes=cache_stats.writes,
+            read_failures=cache_stats.read_failures,
+            write_failures=cache_stats.write_failures,
+            invalid_entries=cache_stats.invalid_entries,
+            hit_rate=cache_stats.hit_rate,
+        ),
     )
