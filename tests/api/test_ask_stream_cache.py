@@ -98,7 +98,9 @@ async def test_stream_cache_hit_replays_exact_response_and_bypasses_rag(
 
     events = parse_sse(response.text)
     assert [name for name, _ in events] == ["metadata", "delta", "sources", "done"]
-    assert events[0][1] == {"retrieval_mode": "vector_fallback", "source_count": 2}
+    assert events[0][1]["retrieval_mode"] == "vector_fallback"
+    assert events[0][1]["source_count"] == 2
+    assert events[0][1]["cache_status"] == "hit"
     assert "".join(data["text"] for name, data in events if name == "delta") == cached.answer
     assert events[-2][1]["sources"] == cached.model_dump(mode="json")["sources"]
     assert events[-1][1] == {
@@ -134,6 +136,7 @@ async def test_stream_miss_uses_genuine_stream_and_stores_final_response(
     assert stored.model == "fake-model"
     assert stored.prompt_tokens == 80
     assert stored.completion_tokens == 9
+    assert events[0][1]["cache_status"] == "miss"
 
 
 @pytest.mark.anyio
@@ -190,6 +193,8 @@ async def test_stream_cache_failures_and_fingerprint_bypass_preserve_success(
     second = await client.post("/api/v1/ask/stream", json={"question": "Bypass"})
 
     assert parse_sse(first.text)[-1][0] == parse_sse(second.text)[-1][0] == "done"
+    assert parse_sse(first.text)[0][1]["cache_status"] == "miss"
+    assert parse_sse(second.text)[0][1]["cache_status"] == "bypass"
     assert len(cache.get_calls) == before_gets
     assert len(cache.set_calls) == before_sets
     assert hybrid.search.call_count == len(provider.calls) == 2
@@ -207,8 +212,10 @@ async def test_stream_cache_read_and_serialization_failures_are_fail_open(
     ):
         response = await client.post("/api/v1/ask/stream", json={"question": "Question"})
 
-    assert parse_sse(response.text)[-2:][0][0] == "sources"
-    assert parse_sse(response.text)[-1][0] == "done"
+    events = parse_sse(response.text)
+    assert events[0][1]["cache_status"] == "failure"
+    assert events[-2:][0][0] == "sources"
+    assert events[-1][0] == "done"
     assert hybrid.search.call_count == len(provider.calls) == 1
     assert cache.set_calls == []
 

@@ -103,7 +103,9 @@ async def test_stream_endpoint_retrieves_once_and_emits_ordered_json_sse(client,
     assert names[0] == "metadata"
     assert names[-2:] == ["sources", "done"]
     assert names[1:-2] == ["delta", "delta", "delta"]
-    assert events[0][1] == {"retrieval_mode": "hybrid", "source_count": 1}
+    assert events[0][1]["retrieval_mode"] == "hybrid"
+    assert events[0][1]["source_count"] == 1
+    assert events[0][1]["cache_status"] == "bypass"
     assert "".join(data["text"] for name, data in events if name == "delta") == ("Grounded café [S1].")
     assert events[-2][1]["sources"][0]["content"] == "Evidence with Unicode café."
     assert events[-1][1] == {

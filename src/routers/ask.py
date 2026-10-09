@@ -42,6 +42,33 @@ def _answer_citations(answer: str) -> list[str]:
     return list(dict.fromkeys(CITATION.findall(answer)))
 
 
+def _stream_metadata(
+    *,
+    retrieval_mode: str | None,
+    source_count: int,
+    cache_status: str,
+    settings: RequestSettingsDep,
+    observability: ObservabilityDep,
+) -> dict[str, object]:
+    try:
+        observability_status = observability.status.value
+    except Exception:
+        observability_status = "unavailable"
+    return {
+        "retrieval_mode": retrieval_mode,
+        "source_count": source_count,
+        "cache_status": cache_status,
+        "retrieval_size": settings.rag_retrieval_size,
+        "embedding_model": settings.embedding_model,
+        "embedding_dimension": settings.embedding_dimension,
+        "rrf_k": settings.hybrid_rrf_k,
+        "llm_temperature": settings.llm_temperature,
+        "max_completion_tokens": settings.llm_max_completion_tokens,
+        "observability_provider": "langfuse" if settings.langfuse_enabled else "disabled",
+        "observability_status": observability_status,
+    }
+
+
 def _response_trace_metadata(
     response: AskResponse,
     *,
@@ -88,11 +115,15 @@ async def _store_with_trace(
     return outcome
 
 
-async def _replay_cached_response(response: AskResponse) -> AsyncIterator[str]:
+async def _replay_cached_response(
+    response: AskResponse,
+    *,
+    metadata: dict[str, object],
+) -> AsyncIterator[str]:
     """Replay one complete cached response through the compatible SSE protocol."""
     yield _sse(
         "metadata",
-        {"retrieval_mode": response.retrieval_mode, "source_count": len(response.sources)},
+        metadata,
     )
     yield _sse("delta", {"text": response.answer})
     yield _sse(
@@ -274,9 +305,20 @@ async def stream_ask_question(
     )
     cache_span.end()
     if cache_lookup.response is not None:
+        replay_metadata = _stream_metadata(
+            retrieval_mode=cache_lookup.response.retrieval_mode,
+            source_count=len(cache_lookup.response.sources),
+            cache_status=cache_lookup.outcome.value,
+            settings=settings,
+            observability=observability,
+        )
+
         async def cached_events() -> AsyncIterator[str]:
             try:
-                async for frame in _replay_cached_response(cache_lookup.response):
+                async for frame in _replay_cached_response(
+                    cache_lookup.response,
+                    metadata=replay_metadata,
+                ):
                     if frame.startswith("event: done\n"):
                         root.update(
                             metadata={
@@ -354,7 +396,13 @@ async def stream_ask_question(
         source_count = len(prepared.sources) if prepared is not None else 0
         yield _sse(
             "metadata",
-            {"retrieval_mode": retrieval_result.retrieval_mode, "source_count": source_count},
+            _stream_metadata(
+                retrieval_mode=retrieval_result.retrieval_mode,
+                source_count=source_count,
+                cache_status=cache_lookup.outcome.value,
+                settings=settings,
+                observability=observability,
+            ),
         )
         if prepared is None:
             response = AskResponse(
