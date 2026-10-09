@@ -116,6 +116,7 @@ def test_week6_redis_defaults_are_optional_and_secret_safe() -> None:
     assert settings.redis_enabled is False
     assert settings.redis_url.get_secret_value() == "redis://127.0.0.1:6379/0"
     assert settings.rag_cache_ttl_seconds == 86_400
+    assert settings.rag_corpus_generation == "corpus-v1"
     assert "redis://127.0.0.1:6379/0" not in repr(settings)
 
 
@@ -146,3 +147,9 @@ def test_disabled_redis_allows_blank_url_and_requires_no_server() -> None:
     settings = make_settings(redis_enabled=False, redis_url="")
 
     assert settings.redis_enabled is False
+
+
+@pytest.mark.parametrize("generation", ["", "   "])
+def test_corpus_generation_must_not_be_blank(generation: str) -> None:
+    with pytest.raises(ValidationError, match="corpus generation"):
+        make_settings(rag_corpus_generation=generation)

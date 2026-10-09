@@ -62,6 +62,7 @@ class Settings(DefaultSettings):
     redis_enabled: bool = False
     redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
     rag_cache_ttl_seconds: int = Field(default=86_400, gt=0)
+    rag_corpus_generation: str = "corpus-v1"
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
@@ -95,6 +96,8 @@ class Settings(DefaultSettings):
     def validate_redis_configuration(self) -> "Settings":
         if self.redis_enabled and not self.redis_url.get_secret_value().strip():
             raise ValueError("Redis URL must not be blank when Redis caching is enabled")
+        if not self.rag_corpus_generation.strip():
+            raise ValueError("RAG corpus generation must not be blank")
         return self
 
     @model_validator(mode="after")
