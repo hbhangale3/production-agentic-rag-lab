@@ -1,3 +1,4 @@
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from src.exceptions import InsufficientEvidenceError, RAGPromptBudgetError
 from src.schemas.hybrid_search import HybridSearchResult
 from src.services.evidence import EvidenceContextBuilder, EvidenceSource, TokenCounter
 from src.services.llm.base import ChatMessage, LLMProvider
+from src.services.observability import Observation
 from src.services.rag.prompt import RAGPromptBuilder
 from src.services.rag.validation import FULLWIDTH_CITATION, GroundedAnswerValidator
 
@@ -105,15 +107,63 @@ class RAGGenerationService:
         *,
         question: str,
         retrieval_result: HybridSearchResult,
+        observation: Observation | None = None,
     ) -> RAGGenerationResult:
-        prepared = self.prepare(question=question, retrieval_result=retrieval_result)
-
-        completion = await self.llm_provider.complete(
-            prepared.messages,
-            temperature=self.temperature,
-            max_tokens=self.max_completion_tokens,
+        prepared = self.prepare(
+            question=question,
+            retrieval_result=retrieval_result,
+            observation=observation,
         )
-        validated = self.answer_validator.validate(completion.content, prepared.sources)
+
+        generation_span = self._start_span(
+            observation,
+            "rag.generation",
+            {
+                "streaming": False,
+                "temperature": self.temperature,
+                "max_completion_tokens": self.max_completion_tokens,
+            },
+        )
+        try:
+            completion = await self.llm_provider.complete(
+                prepared.messages,
+                temperature=self.temperature,
+                max_tokens=self.max_completion_tokens,
+            )
+        except Exception as exc:
+            self._finish_span(generation_span, error_type=type(exc).__name__)
+            raise
+        self._finish_span(
+            generation_span,
+            metadata={
+                "model": completion.model,
+                "prompt_tokens": completion.prompt_tokens,
+                "completion_tokens": completion.completion_tokens,
+            },
+        )
+
+        grounding_span = self._start_span(
+            observation,
+            "rag.grounding",
+            {"source_count": len(prepared.sources)},
+        )
+        try:
+            validated = self.answer_validator.validate(completion.content, prepared.sources)
+        except Exception as exc:
+            self._finish_span(
+                grounding_span,
+                metadata={"passed": False},
+                error_type=type(exc).__name__,
+            )
+            raise
+        self._finish_span(
+            grounding_span,
+            metadata={
+                "passed": True,
+                "citation_count": len(validated.cited_labels),
+                "citation_free_insufficiency": validated.is_insufficiency,
+            },
+        )
 
         return RAGGenerationResult(
             answer=validated.answer,
@@ -127,17 +177,48 @@ class RAGGenerationService:
             token_counting=self.token_counter.description,
         )
 
-    def prepare(self, *, question: str, retrieval_result: HybridSearchResult) -> PreparedRAGGeneration:
+    def prepare(
+        self,
+        *,
+        question: str,
+        retrieval_result: HybridSearchResult,
+        observation: Observation | None = None,
+    ) -> PreparedRAGGeneration:
         """Build and validate all deterministic inputs before generation starts."""
-        normalized_question = self.prompt_builder.normalize_question(question)
-        evidence = self.evidence_builder.build(retrieval_result)
-        if not evidence.text.strip() or not evidence.sources:
-            raise InsufficientEvidenceError("No usable retrieved evidence is available")
-        messages = tuple(self.prompt_builder.build(question=normalized_question, evidence=evidence))
-        estimated_prompt_tokens = sum(self.token_counter.count(message.content) for message in messages)
-        required_tokens = estimated_prompt_tokens + self.max_completion_tokens + self.token_safety_margin
-        if required_tokens > self.context_window_tokens:
-            raise RAGPromptBudgetError("Estimated prompt, completion allowance, and safety margin exceed the context window")
+        evidence_span = self._start_span(
+            observation,
+            "rag.evidence",
+            {
+                "retrieved_count": retrieval_result.count,
+                "context_token_budget": self.evidence_builder.max_context_tokens,
+            },
+        )
+        try:
+            normalized_question = self.prompt_builder.normalize_question(question)
+            evidence = self.evidence_builder.build(retrieval_result)
+            evidence_metadata: dict[str, object] = {
+                "selected_source_count": len(evidence.sources),
+                "context_tokens": evidence.estimated_tokens,
+                "truncated_source_count": sum(source.truncated for source in evidence.sources),
+                "retrieval_mode": evidence.retrieval_mode,
+            }
+            if not evidence.text.strip() or not evidence.sources:
+                evidence_metadata["insufficient_evidence"] = True
+                self._finish_span(evidence_span, metadata=evidence_metadata)
+                raise InsufficientEvidenceError("No usable retrieved evidence is available")
+            messages = tuple(self.prompt_builder.build(question=normalized_question, evidence=evidence))
+            estimated_prompt_tokens = sum(self.token_counter.count(message.content) for message in messages)
+            required_tokens = estimated_prompt_tokens + self.max_completion_tokens + self.token_safety_margin
+            if required_tokens > self.context_window_tokens:
+                raise RAGPromptBudgetError(
+                    "Estimated prompt, completion allowance, and safety margin exceed the context window"
+                )
+        except InsufficientEvidenceError:
+            raise
+        except Exception as exc:
+            self._finish_span(evidence_span, error_type=type(exc).__name__)
+            raise
+        self._finish_span(evidence_span, metadata=evidence_metadata)
         return PreparedRAGGeneration(
             messages=messages,
             sources=evidence.sources,
@@ -145,39 +226,117 @@ class RAGGenerationService:
             estimated_prompt_tokens=estimated_prompt_tokens,
         )
 
-    async def stream_generate(self, prepared: PreparedRAGGeneration) -> AsyncIterator[RAGStreamDelta | RAGStreamComplete]:
+    async def stream_generate(
+        self,
+        prepared: PreparedRAGGeneration,
+        *,
+        observation: Observation | None = None,
+    ) -> AsyncIterator[RAGStreamDelta | RAGStreamComplete]:
         """Stream canonical text, then validate citations and emit completion metadata."""
         normalizer = _FullwidthCitationStreamNormalizer()
         answer_parts: list[str] = []
         model: str | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
-        async for event in self.llm_provider.stream(
-            prepared.messages,
-            temperature=self.temperature,
-            max_tokens=self.max_completion_tokens,
-        ):
-            model = event.model or model
-            prompt_tokens = event.prompt_tokens if event.prompt_tokens is not None else prompt_tokens
-            completion_tokens = event.completion_tokens if event.completion_tokens is not None else completion_tokens
-            if event.text is None:
-                continue
-            text = normalizer.feed(event.text)
-            if text:
-                answer_parts.append(text)
-                yield RAGStreamDelta(text=text)
+        generation_span = self._start_span(
+            observation,
+            "rag.generation",
+            {
+                "streaming": True,
+                "temperature": self.temperature,
+                "max_completion_tokens": self.max_completion_tokens,
+            },
+        )
+        generation_finished = False
+        try:
+            async for event in self.llm_provider.stream(
+                prepared.messages,
+                temperature=self.temperature,
+                max_tokens=self.max_completion_tokens,
+            ):
+                model = event.model or model
+                prompt_tokens = event.prompt_tokens if event.prompt_tokens is not None else prompt_tokens
+                completion_tokens = event.completion_tokens if event.completion_tokens is not None else completion_tokens
+                if event.text is None:
+                    continue
+                text = normalizer.feed(event.text)
+                if text:
+                    answer_parts.append(text)
+                    yield RAGStreamDelta(text=text)
+            generation_finished = True
+        except asyncio.CancelledError:
+            self._finish_span(generation_span, error_type="cancelled")
+            generation_finished = True
+            raise
+        except Exception as exc:
+            self._finish_span(generation_span, error_type=type(exc).__name__)
+            generation_finished = True
+            raise
+        finally:
+            if not generation_finished:
+                # Async-generator close/client disconnect before provider completion.
+                self._finish_span(generation_span, error_type="cancelled")
         tail = normalizer.finish()
         if tail:
             answer_parts.append(tail)
             yield RAGStreamDelta(text=tail)
+        self._finish_span(
+            generation_span,
+            metadata={
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        )
         answer = "".join(answer_parts)
-        validated = self.answer_validator.validate(answer, prepared.sources)
+        grounding_span = self._start_span(
+            observation,
+            "rag.grounding",
+            {"source_count": len(prepared.sources)},
+        )
+        try:
+            validated = self.answer_validator.validate(answer, prepared.sources)
+        except Exception as exc:
+            self._finish_span(
+                grounding_span,
+                metadata={"passed": False},
+                error_type=type(exc).__name__,
+            )
+            raise
+        self._finish_span(
+            grounding_span,
+            metadata={
+                "passed": True,
+                "citation_count": len(validated.cited_labels),
+                "citation_free_insufficiency": validated.is_insufficiency,
+            },
+        )
         yield RAGStreamComplete(
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cited_labels=validated.cited_labels,
         )
+
+    @staticmethod
+    def _start_span(
+        observation: Observation | None,
+        name: str,
+        metadata: dict[str, object],
+    ) -> Observation | None:
+        return observation.start_span(name=name, metadata=metadata) if observation is not None else None
+
+    @staticmethod
+    def _finish_span(
+        observation: Observation | None,
+        *,
+        metadata: dict[str, object] | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        if observation is None:
+            return
+        observation.update(metadata=metadata, error_type=error_type)
+        observation.end()
 
     @staticmethod
     def _require_positive_integer(value: object, name: str) -> None:

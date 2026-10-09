@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from src.config import Settings
@@ -22,12 +23,26 @@ class CorpusFingerprintProvider(Protocol):
     def get_fingerprint(self) -> str | None: ...
 
 
+class RAGCacheOutcome(StrEnum):
+    HIT = "hit"
+    MISS = "miss"
+    BYPASS = "bypass"
+    FAILURE = "failure"
+
+
+class RAGCacheWriteOutcome(StrEnum):
+    STORED = "stored"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 @dataclass(frozen=True)
 class RAGCacheLookup:
     """One request's private cache state and optional validated hit."""
 
     key: str | None
     response: AskResponse | None = None
+    outcome: RAGCacheOutcome = RAGCacheOutcome.BYPASS
 
 
 class RAGResponseCacheCoordinator:
@@ -56,14 +71,14 @@ class RAGResponseCacheCoordinator:
         if not self.enabled:
             self.stats.increment("bypasses")
             logger.debug("RAG response cache bypassed because caching is disabled")
-            return RAGCacheLookup(key=None)
+            return RAGCacheLookup(key=None, outcome=RAGCacheOutcome.BYPASS)
 
         try:
             fingerprint = self.fingerprint_provider.get_fingerprint()
             if fingerprint is None:
                 self.stats.increment("bypasses")
                 logger.debug("RAG response cache bypassed because corpus state is unavailable")
-                return RAGCacheLookup(key=None)
+                return RAGCacheLookup(key=None, outcome=RAGCacheOutcome.BYPASS)
             identity = self.identity_factory.create(
                 question=question,
                 corpus_fingerprint=fingerprint,
@@ -72,7 +87,7 @@ class RAGResponseCacheCoordinator:
         except Exception:
             self.stats.increment("bypasses")
             logger.warning("RAG response cache identity unavailable; bypassing cache")
-            return RAGCacheLookup(key=None)
+            return RAGCacheLookup(key=None, outcome=RAGCacheOutcome.BYPASS)
 
         try:
             get_result = getattr(self.cache, "get_result", None)
@@ -86,36 +101,36 @@ class RAGResponseCacheCoordinator:
         except Exception:
             self.stats.increment("read_failures")
             logger.warning("RAG response cache read failed; continuing without cached response")
-            return RAGCacheLookup(key=key)
+            return RAGCacheLookup(key=key, outcome=RAGCacheOutcome.FAILURE)
         if read_status is CacheReadStatus.FAILURE:
             self.stats.increment("read_failures")
             logger.debug("RAG response cache read was unavailable")
-            return RAGCacheLookup(key=key)
+            return RAGCacheLookup(key=key, outcome=RAGCacheOutcome.FAILURE)
         if read_status is CacheReadStatus.MISS or payload is None:
             self.stats.increment("misses")
             logger.debug("RAG response cache miss")
-            return RAGCacheLookup(key=key)
+            return RAGCacheLookup(key=key, outcome=RAGCacheOutcome.MISS)
 
         response = deserialize_cached_response(payload)
         if response is None:
             self.stats.increment("misses")
             self.stats.increment("invalid_entries")
             logger.warning("RAG response cache entry was invalid; treating it as a miss")
-            return RAGCacheLookup(key=key)
+            return RAGCacheLookup(key=key, outcome=RAGCacheOutcome.MISS)
         self.stats.increment("hits")
         logger.debug("RAG response cache hit")
-        return RAGCacheLookup(key=key, response=response)
+        return RAGCacheLookup(key=key, response=response, outcome=RAGCacheOutcome.HIT)
 
-    async def store(self, lookup: RAGCacheLookup, response: AskResponse) -> None:
+    async def store(self, lookup: RAGCacheLookup, response: AskResponse) -> RAGCacheWriteOutcome:
         """Best-effort store of an already successful public response."""
         if lookup.key is None:
-            return
+            return RAGCacheWriteOutcome.SKIPPED
         try:
             payload = serialize_cached_response(response)
         except Exception:
             self.stats.increment("write_failures")
             logger.warning("RAG response serialization failed; skipping cache write")
-            return
+            return RAGCacheWriteOutcome.FAILED
         try:
             stored = await self.cache.set(
                 lookup.key,
@@ -125,12 +140,13 @@ class RAGResponseCacheCoordinator:
         except Exception:
             self.stats.increment("write_failures")
             logger.warning("RAG response cache write failed; returning generated response")
-            return
+            return RAGCacheWriteOutcome.FAILED
         if not stored:
             self.stats.increment("write_failures")
             logger.debug("RAG response cache write was unavailable")
-            return
+            return RAGCacheWriteOutcome.FAILED
         self.stats.increment("writes")
+        return RAGCacheWriteOutcome.STORED
 
     def stats_snapshot(self) -> CacheStatsSnapshot:
         return self.stats.snapshot()

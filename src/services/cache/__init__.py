@@ -17,7 +17,12 @@ from src.services.cache.rag_contract import (
     deserialize_cached_response,
     serialize_cached_response,
 )
-from src.services.cache.rag_response_cache import RAGCacheLookup, RAGResponseCacheCoordinator
+from src.services.cache.rag_response_cache import (
+    RAGCacheLookup,
+    RAGCacheOutcome,
+    RAGCacheWriteOutcome,
+    RAGResponseCacheCoordinator,
+)
 from src.services.cache.redis_cache import RedisCache
 from src.services.cache.stats import CacheStats, CacheStatsSnapshot
 
@@ -41,6 +46,8 @@ __all__ = [
     "RAGCacheKeyBuilder",
     "RedisCache",
     "RAGCacheLookup",
+    "RAGCacheOutcome",
+    "RAGCacheWriteOutcome",
     "RAGResponseCacheCoordinator",
     "deserialize_cached_response",
     "make_cache",
