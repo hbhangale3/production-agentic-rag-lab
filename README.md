@@ -212,6 +212,24 @@ uv run python scripts/test_bm25_search_apis.py
 
 The script calls all seven Week 3 search endpoints over HTTP using real indexed papers and prints up to five ranked results per strategy. Set `API_BASE_URL` or `RESULT_SIZE` to override the defaults. It is a manual learning, demonstration, and integration-validation tool; it is intentionally outside the normal pytest suite.
 
+### Week 5 Grounded RAG Demo
+
+Week 5 provides grounded JSON and SSE APIs plus a local Gradio presentation layer.
+Start FastAPI and Gradio in separate terminals:
+
+```bash
+OPENSEARCH_HOST=http://127.0.0.1:9200 \
+  uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
+
+RAG_API_BASE_URL=http://127.0.0.1:8001 \
+  uv run python -m src.gradio_app
+```
+
+Open <http://127.0.0.1:7860>. The UI consumes the real streaming endpoint; it
+does not call Groq or retrieval services directly. See
+[the final Week 5 guide](docs/week5-m08-final.md) for architecture, API contracts,
+limitations, and safe SSH-tunnel instructions.
+
 ---
 
 ## 🎓 Learning Path

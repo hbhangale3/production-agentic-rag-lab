@@ -17,6 +17,7 @@ dependencies = [
     "docling>=2.0.0",
     "sentence-transformers>=6.1.0",
     "groq>=1.2.0,<2.0.0",
+    "gradio>=6.15.1",
 ]
 readme = "README.md"
 
