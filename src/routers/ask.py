@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import AsyncIterator
 from functools import partial
 
@@ -25,10 +26,38 @@ from starlette.responses import StreamingResponse
 
 router = APIRouter()
 INSUFFICIENT_EVIDENCE_ANSWER = "The available indexed evidence is insufficient to answer this question."
+CITATION = re.compile(r"\[S[1-9]\d*\]")
 
 
 def _sse(event: str, data: object) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _answer_citations(answer: str) -> list[str]:
+    """Recover ordered unique citations for the existing SSE done payload."""
+    return list(dict.fromkeys(CITATION.findall(answer)))
+
+
+async def _replay_cached_response(response: AskResponse) -> AsyncIterator[str]:
+    """Replay one complete cached response through the compatible SSE protocol."""
+    yield _sse(
+        "metadata",
+        {"retrieval_mode": response.retrieval_mode, "source_count": len(response.sources)},
+    )
+    yield _sse("delta", {"text": response.answer})
+    yield _sse(
+        "sources",
+        {"sources": [source.model_dump(mode="json") for source in response.sources]},
+    )
+    yield _sse(
+        "done",
+        {
+            "model": response.model,
+            "prompt_tokens": response.prompt_tokens,
+            "completion_tokens": response.completion_tokens,
+            "citations": _answer_citations(response.answer),
+        },
+    )
 
 
 @router.post("/ask", response_model=AskResponse)
@@ -103,9 +132,18 @@ async def stream_ask_question(
     request: AskRequest,
     hybrid_service: HybridSearchServiceDep,
     rag_service: RAGGenerationServiceDep,
+    response_cache: RAGResponseCacheDep,
     settings: RequestSettingsDep,
 ) -> StreamingResponse:
     """Retrieve once, then stream grounded generation as JSON SSE events."""
+    cache_lookup = await response_cache.lookup(question=request.question)
+    if cache_lookup.response is not None:
+        return StreamingResponse(
+            _replay_cached_response(cache_lookup.response),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     search = partial(hybrid_service.search, request.question, size=settings.rag_retrieval_size)
     try:
         retrieval_result = await run_in_threadpool(search)
@@ -138,7 +176,16 @@ async def stream_ask_question(
             {"retrieval_mode": retrieval_result.retrieval_mode, "source_count": source_count},
         )
         if prepared is None:
+            response = AskResponse(
+                answer=INSUFFICIENT_EVIDENCE_ANSWER,
+                sources=[],
+                retrieval_mode=retrieval_result.retrieval_mode,
+                model=None,
+                prompt_tokens=None,
+                completion_tokens=None,
+            )
             yield _sse("delta", {"text": INSUFFICIENT_EVIDENCE_ANSWER})
+            await response_cache.store(cache_lookup, response)
             yield _sse("sources", {"sources": []})
             yield _sse(
                 "done",
@@ -150,13 +197,27 @@ async def stream_ask_question(
                 },
             )
             return
+        answer_parts: list[str] = []
         try:
             async for event in rag_service.stream_generate(prepared):
                 if isinstance(event, RAGStreamDelta):
+                    answer_parts.append(event.text)
                     yield _sse("delta", {"text": event.text})
                 elif isinstance(event, RAGStreamComplete):
-                    sources = [build_ask_source(source).model_dump(mode="json") for source in prepared.sources]
-                    yield _sse("sources", {"sources": sources})
+                    sources = [build_ask_source(source) for source in prepared.sources]
+                    response = AskResponse(
+                        answer="".join(answer_parts),
+                        sources=sources,
+                        retrieval_mode=prepared.retrieval_mode,
+                        model=event.model,
+                        prompt_tokens=event.prompt_tokens,
+                        completion_tokens=event.completion_tokens,
+                    )
+                    await response_cache.store(cache_lookup, response)
+                    yield _sse(
+                        "sources",
+                        {"sources": [source.model_dump(mode="json") for source in sources]},
+                    )
                     yield _sse(
                         "done",
                         {
