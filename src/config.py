@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +45,13 @@ class Settings(DefaultSettings):
     chunk_overlap_words: int = Field(default=100, ge=0)
     chunk_min_words: int = Field(default=100, gt=0)
 
+    # Week 5 LLM configuration
+    llm_provider: Literal["groq"] = "groq"
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    llm_timeout_seconds: float = Field(default=30.0, gt=0)
+    llm_max_retries: int = Field(default=2, ge=0)
+
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
     arxiv_search_category: str = "cs.AI"
@@ -63,6 +70,15 @@ class Settings(DefaultSettings):
     arxiv_ingestion_batch_size: int = 1
     arxiv_ingestion_schedule: str = "0 3 * * *"
     arxiv_ingestion_process_pdfs: bool = True
+
+    @field_validator("groq_model")
+    @classmethod
+    def validate_groq_model(cls, value: str) -> str:
+        """Require a usable model identifier without exposing credentials."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Groq model must not be blank")
+        return normalized
 
     @model_validator(mode="after")
     def validate_chunk_sizes(self) -> "Settings":

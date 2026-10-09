@@ -42,9 +42,20 @@ class HybridSearchError(Exception):
     """Exception raised when neither hybrid retrieval path can produce results."""
 
 
-# Week 6+: LLM exceptions (placeholders for Week 1)
 class LLMException(Exception):
     """Base exception for LLM-related errors."""
+
+
+class LLMConfigurationError(LLMException):
+    """Exception raised when an LLM provider cannot be configured safely."""
+
+
+class LLMRequestError(LLMException):
+    """Exception raised when an LLM provider request fails."""
+
+
+class LLMResponseError(LLMException):
+    """Exception raised when an LLM provider returns an unusable response."""
 
 
 # General application exceptions

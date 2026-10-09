@@ -54,3 +54,34 @@ def test_minimum_chunk_size_may_equal_target() -> None:
     settings = make_settings(chunk_target_words=600, chunk_min_words=600)
 
     assert settings.chunk_min_words == settings.chunk_target_words
+
+
+def test_week5_llm_defaults_do_not_require_credentials() -> None:
+    settings = make_settings()
+
+    assert settings.llm_provider == "groq"
+    assert settings.groq_api_key is None
+    assert settings.groq_model == "llama-3.3-70b-versatile"
+    assert settings.llm_timeout_seconds == 30.0
+    assert settings.llm_max_retries == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("groq_model", "  "),
+        ("llm_timeout_seconds", 0),
+        ("llm_timeout_seconds", -1),
+        ("llm_max_retries", -1),
+    ],
+)
+def test_invalid_week5_llm_settings_are_rejected(field: str, value: Any) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})
+
+
+def test_groq_api_key_is_redacted_from_settings_representation() -> None:
+    settings = make_settings(groq_api_key="super-secret-test-key")
+
+    assert "super-secret-test-key" not in repr(settings)
+    assert "**********" in repr(settings)
