@@ -65,6 +65,14 @@ class Settings(DefaultSettings):
     rag_cache_ttl_seconds: int = Field(default=86_400, gt=0)
     rag_corpus_generation: str = "corpus-v1"
 
+    # Week 6 optional request observability foundation
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_capture_content: bool = False
+    langfuse_timeout_seconds: int = Field(default=5, gt=0, le=30)
+
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
     arxiv_search_category: str = "cs.AI"
@@ -99,6 +107,17 @@ class Settings(DefaultSettings):
             raise ValueError("Redis URL must not be blank when Redis caching is enabled")
         if not self.rag_corpus_generation.strip():
             raise ValueError("RAG corpus generation must not be blank")
+        return self
+
+    @model_validator(mode="after")
+    def validate_langfuse_configuration(self) -> "Settings":
+        if not self.langfuse_host.strip():
+            raise ValueError("Langfuse host must not be blank")
+        if self.langfuse_enabled:
+            if not self.langfuse_public_key or not self.langfuse_public_key.strip():
+                raise ValueError("Langfuse public key is required when observability is enabled")
+            if self.langfuse_secret_key is None or not self.langfuse_secret_key.get_secret_value().strip():
+                raise ValueError("Langfuse secret key is required when observability is enabled")
         return self
 
     @model_validator(mode="after")

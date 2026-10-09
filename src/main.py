@@ -13,6 +13,7 @@ from src.services.cache import RAGResponseCacheCoordinator, make_cache
 from src.services.embeddings.factory import make_embedding_provider
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm.factory import make_llm_provider
+from src.services.observability import make_observability_provider
 from src.services.opensearch.factory import make_chunk_index_manager
 from src.services.rag import RAGGenerationService
 from src.services.search.chunk_bm25_service import ChunkBM25SearchService
@@ -38,6 +39,8 @@ async def lifespan(app: FastAPI):
     cache = make_cache(settings)
     app.state.cache = cache
     app.state.rag_response_cache = RAGResponseCacheCoordinator(cache=cache, settings=settings)
+    observability = make_observability_provider(settings)
+    app.state.observability = observability
 
     database = make_database()
     app.state.database = database
@@ -89,6 +92,8 @@ async def lifespan(app: FastAPI):
     chunk_index.close()
     if llm_provider is not None:
         await llm_provider.close()
+    await observability.flush()
+    await observability.close()
     await cache.close()
     logger.info("API shutdown complete")
 

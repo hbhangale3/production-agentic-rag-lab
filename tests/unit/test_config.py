@@ -160,3 +160,51 @@ def test_disabled_redis_allows_blank_url_and_requires_no_server() -> None:
 def test_corpus_generation_must_not_be_blank(generation: str) -> None:
     with pytest.raises(ValidationError, match="corpus generation"):
         make_settings(rag_corpus_generation=generation)
+
+
+def test_langfuse_defaults_are_disabled_and_require_no_credentials() -> None:
+    settings = make_settings()
+
+    assert settings.langfuse_enabled is False
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_host == "https://cloud.langfuse.com"
+    assert settings.langfuse_capture_content is False
+    assert settings.langfuse_timeout_seconds == 5
+
+
+@pytest.mark.parametrize(
+    ("public_key", "secret_key", "message"),
+    [
+        (None, "test-secret", "public key"),
+        ("   ", "test-secret", "public key"),
+        ("test-public", None, "secret key"),
+        ("test-public", "   ", "secret key"),
+    ],
+)
+def test_enabled_langfuse_requires_both_keys(public_key, secret_key, message) -> None:
+    with pytest.raises(ValidationError, match=message):
+        make_settings(
+            langfuse_enabled=True,
+            langfuse_public_key=public_key,
+            langfuse_secret_key=secret_key,
+        )
+
+
+def test_enabled_langfuse_supports_self_hosting_and_redacts_secret() -> None:
+    settings = make_settings(
+        langfuse_enabled=True,
+        langfuse_public_key="pk-test-only",
+        langfuse_secret_key="obvious-fake-secret",
+        langfuse_host="https://langfuse.internal.example",
+    )
+
+    assert settings.langfuse_host == "https://langfuse.internal.example"
+    assert settings.langfuse_secret_key.get_secret_value() == "obvious-fake-secret"
+    assert "obvious-fake-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 31])
+def test_langfuse_timeout_is_bounded(timeout: int) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(langfuse_timeout_seconds=timeout)

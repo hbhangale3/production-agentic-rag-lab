@@ -19,6 +19,7 @@ dependencies = [
     "groq>=1.2.0,<2.0.0",
     "gradio>=6.15.1",
     "redis>=8.1.0",
+    "langfuse>=4.17.0",
 ]
 readme = "README.md"
 

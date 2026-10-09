@@ -74,3 +74,44 @@ async def test_lifespan_without_credentials_keeps_non_rag_services_available() -
     database.teardown.assert_called_once_with()
     chunk_index.close.assert_called_once_with()
     cache.close.assert_awaited_once_with()
+
+
+@pytest.mark.anyio
+async def test_lifespan_owns_one_observability_provider_and_flushes_before_close() -> None:
+    database, chunk_index, embedding, provider, settings = startup_dependencies()
+    cache = Mock()
+    cache.close = AsyncMock()
+    observability = Mock()
+    lifecycle_order = []
+
+    async def flush():
+        lifecycle_order.append("flush")
+
+    async def close():
+        lifecycle_order.append("close")
+
+    observability.flush = AsyncMock(side_effect=flush)
+    observability.close = AsyncMock(side_effect=close)
+    application = FastAPI()
+
+    with (
+        patch("src.main.get_settings", return_value=settings),
+        patch("src.main.make_database", return_value=database),
+        patch("src.main.make_chunk_index_manager", return_value=chunk_index),
+        patch("src.main.make_embedding_provider", return_value=embedding),
+        patch("src.main.make_cache", return_value=cache),
+        patch("src.main.make_llm_provider", return_value=provider),
+        patch(
+            "src.main.make_observability_provider",
+            return_value=observability,
+        ) as make_observability,
+    ):
+        async with lifespan(application):
+            make_observability.assert_called_once_with(settings)
+            assert application.state.observability is observability
+            observability.flush.assert_not_awaited()
+            observability.close.assert_not_awaited()
+
+    assert lifecycle_order == ["flush", "close"]
+    observability.flush.assert_awaited_once_with()
+    observability.close.assert_awaited_once_with()
