@@ -51,6 +51,7 @@ class Settings(DefaultSettings):
     groq_model: str = "llama-3.3-70b-versatile"
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
+    evidence_context_max_tokens: int = Field(default=6000, gt=0)
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"

@@ -64,6 +64,7 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
     assert settings.groq_model == "llama-3.3-70b-versatile"
     assert settings.llm_timeout_seconds == 30.0
     assert settings.llm_max_retries == 2
+    assert settings.evidence_context_max_tokens == 6000
 
 
 @pytest.mark.parametrize(
@@ -73,6 +74,7 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
         ("llm_timeout_seconds", 0),
         ("llm_timeout_seconds", -1),
         ("llm_max_retries", -1),
+        ("evidence_context_max_tokens", 0),
     ],
 )
 def test_invalid_week5_llm_settings_are_rejected(field: str, value: Any) -> None:
