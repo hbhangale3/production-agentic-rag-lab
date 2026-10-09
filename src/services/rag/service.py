@@ -122,9 +122,19 @@ class RAGGenerationService:
         question: str,
         evidence: EvidenceContext,
         observation: Observation | None = None,
+        previous_answer: str | None = None,
     ) -> RAGGenerationResult:
-        """Generate from an already-built context using the same prompt, budget, and validation."""
-        prepared = self.prepare_from_context(question=question, evidence=evidence, observation=observation)
+        """Generate from an already-built context using the same prompt, budget, and validation.
+
+        ``previous_answer`` requests a regeneration: the same question and
+        evidence, with the rejected answer supplied as untrusted data.
+        """
+        prepared = self.prepare_from_context(
+            question=question,
+            evidence=evidence,
+            observation=observation,
+            previous_answer=previous_answer,
+        )
         return await self._generate_prepared(prepared, observation=observation)
 
     async def _generate_prepared(
@@ -223,6 +233,7 @@ class RAGGenerationService:
         question: str,
         evidence: EvidenceContext,
         observation: Observation | None = None,
+        previous_answer: str | None = None,
     ) -> PreparedRAGGeneration:
         """Validate an already-built context against the same generation budget."""
         evidence_span = self._start_span(
@@ -233,7 +244,12 @@ class RAGGenerationService:
                 "context_token_budget": evidence.max_context_tokens,
             },
         )
-        return self._prepare(question=question, build_evidence=lambda: evidence, evidence_span=evidence_span)
+        return self._prepare(
+            question=question,
+            build_evidence=lambda: evidence,
+            evidence_span=evidence_span,
+            previous_answer=previous_answer,
+        )
 
     def _prepare(
         self,
@@ -241,6 +257,7 @@ class RAGGenerationService:
         question: str,
         build_evidence: Callable[[], EvidenceContext],
         evidence_span: Observation | None,
+        previous_answer: str | None = None,
     ) -> PreparedRAGGeneration:
         try:
             normalized_question = self.prompt_builder.normalize_question(question)
@@ -255,7 +272,16 @@ class RAGGenerationService:
                 evidence_metadata["insufficient_evidence"] = True
                 self._finish_span(evidence_span, metadata=evidence_metadata)
                 raise InsufficientEvidenceError("No usable retrieved evidence is available")
-            messages = tuple(self.prompt_builder.build(question=normalized_question, evidence=evidence))
+            if previous_answer is None:
+                messages = tuple(self.prompt_builder.build(question=normalized_question, evidence=evidence))
+            else:
+                messages = tuple(
+                    self.prompt_builder.build_regeneration(
+                        question=normalized_question,
+                        evidence=evidence,
+                        previous_answer=previous_answer,
+                    )
+                )
             estimated_prompt_tokens = sum(self.token_counter.count(message.content) for message in messages)
             required_tokens = estimated_prompt_tokens + self.max_completion_tokens + self.token_safety_margin
             if required_tokens > self.context_window_tokens:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Annotated, TypedDict
 
 from src.schemas.hybrid_search import HybridSearchResult
+from src.services.agent.answer_grounding import AnswerGroundingResult
 from src.services.agent.events import AgentExecutionEvent
 from src.services.agent.final_evidence import AgentEvidenceCandidate
 from src.services.agent.live_documents import TransientLiveEvidenceChunk
@@ -53,6 +54,7 @@ class AgentState(TypedDict):
     generation_result: RAGGenerationResult | None
     generated_answer: str | None
     grounding_passed: bool | None
+    grounding_result: AnswerGroundingResult | None
     grounding_attempts: int
     execution_events: Annotated[list[AgentExecutionEvent], operator.add]
     terminal_reason: TerminalReason | None
@@ -83,6 +85,7 @@ def create_initial_agent_state(question: str) -> AgentState:
         generation_result=None,
         generated_answer=None,
         grounding_passed=None,
+        grounding_result=None,
         grounding_attempts=0,
         execution_events=[],
         terminal_reason=None,

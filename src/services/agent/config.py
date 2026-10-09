@@ -16,6 +16,7 @@ class AgentGraphConfig(BaseModel):
     evidence_sufficiency_threshold: int = Field(default=60, ge=0, le=100)
     max_local_retrieval_attempts: int = Field(default=2, ge=1)
     retrieval_size: int = Field(default=5, ge=1)
+    answer_grounding_threshold: int = Field(default=60, ge=0, le=100)
     max_grounding_attempts: int = Field(default=2, ge=1)
     live_fallback_enabled: bool = True
     live_arxiv_max_results: int = Field(default=5, ge=1, le=10)

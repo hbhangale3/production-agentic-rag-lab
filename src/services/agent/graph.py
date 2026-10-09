@@ -1,4 +1,4 @@
-"""LangGraph topology: guardrail, local retrieval and rewrite, grading, live fallback, rerank, generation."""
+"""LangGraph topology: guardrail, retrieval and rewrite, grading, live fallback, rerank, generation, grounding."""
 
 import asyncio
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ from typing import Any, Literal
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from src.exceptions import InsufficientEvidenceError
+from src.services.agent.answer_grounding import AnswerGroundingGrader
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
@@ -38,6 +39,7 @@ LiveSelectionRoute = Literal["selected", "none", "failed"]
 LiveDocumentRoute = Literal["evidence", "unusable", "failed"]
 RerankRoute = Literal["selected", "empty", "failed"]
 GenerationRoute = Literal["generated", "insufficient", "failed"]
+GroundingRoute = Literal["passed", "regenerate", "exhausted", "failed"]
 RewriteRoute = Literal["rewritten", "failed"]
 
 
@@ -524,10 +526,13 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
         sequence = _next_sequence(state)
         final = state["final_evidence"]
         local_result = state["local_retrieval_result"]
+        # After a failed grounding attempt this node regenerates from the same evidence.
+        attempt = state["grounding_attempts"] + 1
+        previous_answer = state["generated_answer"] if state["grounding_attempts"] else None
         started = AgentExecutionEvent(
             status=AgentExecutionStatus.GENERATION_STARTED,
             sequence=sequence,
-            metadata=AgentExecutionMetadata(final_source_count=len(final)),
+            metadata=AgentExecutionMetadata(generation_attempt=attempt, final_source_count=len(final)),
         )
         try:
             evidence = context_builder.build_from_sources(
@@ -536,12 +541,19 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
                 retrieval_mode=local_result.retrieval_mode,
                 degradation_reason=local_result.degradation_reason,
             )
-            result = await service.generate_from_context(question=state["original_question"], evidence=evidence)
+            result = await service.generate_from_context(
+                question=state["original_question"],
+                evidence=evidence,
+                previous_answer=previous_answer,
+            )
         except InsufficientEvidenceError:
             # Nothing fit the context budget: there is no evidence to answer from, which is not a failure.
             return {"execution_events": [started]}
         except Exception:
+            # A rejected earlier answer must not remain looking like the current one.
             return {
+                "generation_result": None,
+                "generated_answer": None,
                 "terminal_reason": TerminalReason.GENERATION_FAILED,
                 "error_category": AgentErrorCategory.GENERATION_FAILURE,
                 "execution_events": [
@@ -549,15 +561,19 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
                     AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
                 ],
             }
+        # The previous grounding decision described the previous answer.
         return {
             "generation_result": result,
             "generated_answer": result.answer,
+            "grounding_passed": None,
+            "grounding_result": None,
             "execution_events": [
                 started,
                 AgentExecutionEvent(
                     status=AgentExecutionStatus.GENERATION_COMPLETED,
                     sequence=sequence + 1,
                     metadata=AgentExecutionMetadata(
+                        generation_attempt=attempt,
                         final_source_count=len(result.sources),
                         prompt_tokens=result.prompt_tokens,
                         completion_tokens=result.completion_tokens,
@@ -573,6 +589,89 @@ def _route_after_generation(state: AgentState) -> GenerationRoute:
     if state["error_category"] is not None:
         return "failed"
     return "generated" if state["generation_result"] is not None else "insufficient"
+
+
+def _make_answer_grounding_node(grader: AnswerGroundingGrader, config: AgentGraphConfig):
+    async def answer_grounding(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        if state["grounding_attempts"] >= config.max_grounding_attempts:
+            # Routing prevents this; the node still refuses to exceed the configured total.
+            return {
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.INTERNAL_FAILURE,
+                "execution_events": [
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence)
+                ],
+            }
+        attempt = state["grounding_attempts"] + 1
+        generation = state["generation_result"]
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.GROUNDING_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(grounding_attempt=attempt, final_source_count=len(generation.sources)),
+        )
+        try:
+            # Grade against the labeled, budgeted sources the model actually saw, not final_evidence.
+            result = await grader.grade(
+                state["original_question"],
+                generation.answer,
+                generation.sources,
+                threshold=config.answer_grounding_threshold,
+            )
+        except Exception:
+            return {
+                "grounding_attempts": attempt,
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.ANSWER_GROUNDING_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+        status = AgentExecutionStatus.GROUNDING_PASSED if result.passed else AgentExecutionStatus.GROUNDING_FAILED
+        return {
+            "grounding_attempts": attempt,
+            "grounding_passed": result.passed,
+            "grounding_result": result,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=status,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(
+                        grounding_attempt=attempt,
+                        grounding_score=result.score,
+                        grounding_passed=result.passed,
+                    ),
+                ),
+            ],
+        }
+
+    return answer_grounding
+
+
+def _make_grounding_router(config: AgentGraphConfig):
+    def route_after_answer_grounding(state: AgentState) -> GroundingRoute:
+        if state["error_category"] is not None:
+            return "failed"
+        if state["grounding_passed"]:
+            return "passed"
+        if state["grounding_attempts"] < config.max_grounding_attempts:
+            return "regenerate"
+        return "exhausted"
+
+    return route_after_answer_grounding
+
+
+def _complete_grounding_failed(state: AgentState) -> dict[str, Any]:
+    """The answer stayed ungrounded after every allowed attempt: a semantic outcome, not an error."""
+
+    return {
+        "terminal_reason": TerminalReason.GROUNDING_FAILED,
+        "execution_events": [
+            AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_COMPLETED, sequence=_next_sequence(state))
+        ],
+    }
 
 
 def _complete_insufficient_evidence(state: AgentState) -> dict[str, Any]:
@@ -597,7 +696,7 @@ def build_agent_graph(
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M07 with injected services and no infrastructure creation."""
+    """Compile W7-M08 with injected services and no infrastructure creation."""
 
     graph_config = config or AgentGraphConfig()
     if graph_config.live_fallback_enabled and dependencies.live_search_service is None:
@@ -608,6 +707,7 @@ def build_agent_graph(
     grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
     rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
     final_selector = FinalEvidenceSelector(embedding_provider=dependencies.embedding_provider)
+    grounding_grader = AnswerGroundingGrader(llm_provider=dependencies.llm_provider)
 
     builder = StateGraph(AgentState)
     builder.add_node("graph_start", _start_graph)
@@ -655,8 +755,21 @@ def build_agent_graph(
     builder.add_conditional_edges(
         "answer_generation",
         _route_after_generation,
-        {"generated": "graph_complete", "insufficient": "insufficient_evidence", "failed": END},
+        {"generated": "answer_grounding", "insufficient": "insufficient_evidence", "failed": END},
     )
+    builder.add_node("answer_grounding", _make_answer_grounding_node(grounding_grader, graph_config))
+    builder.add_conditional_edges(
+        "answer_grounding",
+        _make_grounding_router(graph_config),
+        {
+            "passed": "graph_complete",
+            "regenerate": "answer_generation",
+            "exhausted": "grounding_failed",
+            "failed": END,
+        },
+    )
+    builder.add_node("grounding_failed", _complete_grounding_failed)
+    builder.add_edge("grounding_failed", END)
     builder.add_node("insufficient_evidence", _complete_insufficient_evidence)
     builder.add_node("graph_complete", _complete_graph)
     builder.add_edge(START, "graph_start")

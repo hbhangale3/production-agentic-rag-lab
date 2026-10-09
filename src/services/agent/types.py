@@ -25,5 +25,6 @@ class AgentErrorCategory(StrEnum):
     LIVE_DOCUMENT_PROCESSING_FAILURE = "live_document_processing_failure"
     GENERATION_FAILURE = "generation_failure"
     GROUNDING_FAILURE = "grounding_failure"
+    ANSWER_GROUNDING_FAILURE = "answer_grounding_failure"
     INTERNAL_FAILURE = "internal_failure"
     CANCELLED = "cancelled"

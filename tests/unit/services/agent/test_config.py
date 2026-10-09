@@ -7,6 +7,7 @@ def test_graph_config_defaults_are_bounded() -> None:
     config = AgentGraphConfig()
 
     assert config.guardrail_threshold == 60
+    assert config.answer_grounding_threshold == 60
     assert config.evidence_sufficiency_threshold == 60
     assert config.max_local_retrieval_attempts == 2
     assert config.retrieval_size == 5
@@ -105,3 +106,21 @@ def test_final_evidence_max_sources_boundaries_are_valid(limit: int) -> None:
 def test_final_evidence_max_sources_is_bounded(limit: int) -> None:
     with pytest.raises(ValidationError):
         AgentGraphConfig(final_evidence_max_sources=limit)
+
+
+@pytest.mark.parametrize("threshold", [0, 100])
+def test_answer_grounding_threshold_boundaries_are_valid(threshold: int) -> None:
+    assert AgentGraphConfig(answer_grounding_threshold=threshold).answer_grounding_threshold == threshold
+
+
+@pytest.mark.parametrize("threshold", [-1, 101])
+def test_invalid_answer_grounding_threshold_is_rejected(threshold: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(answer_grounding_threshold=threshold)
+
+
+def test_two_grounding_attempts_mean_initial_grade_plus_one_regeneration() -> None:
+    config = AgentGraphConfig()
+
+    assert config.max_grounding_attempts - 1 == 1
+    assert AgentGraphConfig(max_grounding_attempts=1).max_grounding_attempts == 1

@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import math
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from src.services.agent import (
     AgentExecutionStatus,
     AgentGraphConfig,
     AgentGraphDependencies,
+    AnswerGroundingPromptBuilder,
+    AnswerGroundingResult,
     EvidenceGrade,
     LiveArxivPaper,
     LiveArxivSearchResult,
@@ -46,7 +49,13 @@ LOCAL_ONLY = AgentGraphConfig(live_fallback_enabled=False)
 GUARDRAIL_PASSED = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_PASSED]
 RETRIEVED = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
 RERANKED = [S.EVIDENCE_RERANK_STARTED, S.EVIDENCE_RERANK_COMPLETED]
-GENERATION_TAIL = [*RERANKED, S.GENERATION_STARTED, S.GENERATION_COMPLETED, S.GRAPH_COMPLETED]
+GENERATED = [*RERANKED, S.GENERATION_STARTED, S.GENERATION_COMPLETED]
+GROUNDED = [S.GROUNDING_STARTED, S.GROUNDING_PASSED]
+UNGROUNDED = [S.GROUNDING_STARTED, S.GROUNDING_FAILED]
+REGENERATED = [S.GENERATION_STARTED, S.GENERATION_COMPLETED]
+GENERATION_TAIL = [*GENERATED, *GROUNDED, S.GRAPH_COMPLETED]
+REGENERATE_PASS_TAIL = [*GENERATED, *UNGROUNDED, *REGENERATED, *GROUNDED, S.GRAPH_COMPLETED]
+REGENERATE_FAIL_TAIL = [*GENERATED, *UNGROUNDED, *REGENERATED, *UNGROUNDED, S.GRAPH_COMPLETED]
 RERANK_FAILED_TAIL = [S.EVIDENCE_RERANK_STARTED, S.GRAPH_FAILED]
 GENERATION_FAILED_TAIL = [*RERANKED, S.GENERATION_STARTED, S.GRAPH_FAILED]
 LOCAL_SUFFICIENT = [*RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_SUFFICIENT]
@@ -80,25 +89,39 @@ SELECT_TWO = '{"selected_arxiv_ids":["2501.00001","2501.00002"]}'
 SELECT_NONE = '{"selected_arxiv_ids":[]}'
 CHUNK_TEXT = "private live chunk text"
 ANSWER = "Private generated synthesis [S1]."
+REGENERATED_ANSWER = "Private regenerated synthesis [S1]."
+GROUNDING_SYSTEM_PROMPT = AnswerGroundingPromptBuilder.SYSTEM_PROMPT
 
 
 class FakeLLMProvider:
     """Scripted classifier completions in call order (guardrail, grader, rewrite, grader, selection).
 
-    Answer generation is recognised by the RAG system prompt and served from
-    ``answer`` so that scripts stay about routing decisions.
+    Answer generation and answer grounding are recognised by their system
+    prompts and served from ``answer`` and ``grounding`` so that scripts stay
+    about routing decisions. A tuple scripts successive calls; its last item repeats.
     """
 
-    def __init__(self, *responses: str | Exception, answer: str | Exception = ANSWER) -> None:
+    def __init__(
+        self,
+        *responses: str | Exception,
+        answer: str | Exception | tuple = ANSWER,
+        grounding: str | Exception | tuple = '{"score":90}',
+    ) -> None:
         self.responses = list(responses or ('{"score":90}', '{"score":85}'))
-        self.answer = answer
+        self.answers = answer if isinstance(answer, tuple) else (answer,)
+        self.groundings = grounding if isinstance(grounding, tuple) else (grounding,)
         self.calls: list[tuple] = []
         self.generation_calls: list[tuple] = []
+        self.grounding_calls: list[tuple] = []
 
     async def complete(self, messages, **kwargs):
-        if messages[0].content == RAG_SYSTEM_PROMPT:
+        system = messages[0].content
+        if system == RAG_SYSTEM_PROMPT:
+            response = self.answers[min(len(self.generation_calls), len(self.answers) - 1)]
             self.generation_calls.append((messages, kwargs))
-            response = self.answer
+        elif system == GROUNDING_SYSTEM_PROMPT:
+            response = self.groundings[min(len(self.grounding_calls), len(self.groundings) - 1)]
+            self.grounding_calls.append((messages, kwargs))
         else:
             response = self.responses[len(self.calls)]
             self.calls.append((messages, kwargs))
@@ -254,6 +277,7 @@ def assert_no_downstream_progress(result) -> None:
     assert result["generated_answer"] is None
     assert result["generation_result"] is None
     assert result["grounding_passed"] is None
+    assert result["grounding_result"] is None
     assert result["grounding_attempts"] == 0
     assert result["live_fallback_used"] is False
     assert result["live_search_result"] is None
@@ -272,7 +296,7 @@ async def test_sufficient_path_grades_after_one_retrieval_and_completes() -> Non
     result = await run(deps, question, AgentGraphConfig(retrieval_size=7))
 
     assert statuses(result) == SUFFICIENT_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(12))
+    assert [event.sequence for event in result["execution_events"]] == list(range(14))
     assert len(provider.calls) == 2
     assert len(provider.generation_calls) == 1
     retrieval.search.assert_called_once_with(question, size=7)
@@ -288,8 +312,10 @@ async def test_sufficient_path_grades_after_one_retrieval_and_completes() -> Non
     assert [candidate.source_type for candidate in result["final_evidence"]] == ["local"]
     assert result["generated_answer"] == ANSWER
     assert result["generation_result"].cited_labels == ("[S1]",)
-    assert result["grounding_passed"] is None
-    assert result["grounding_attempts"] == 0
+    assert len(provider.grounding_calls) == 1
+    assert result["grounding_passed"] is True
+    assert result["grounding_result"] == AnswerGroundingResult(score=90, passed=True)
+    assert result["grounding_attempts"] == 1
     assert result["rewritten_query"] is None
     assert result["live_fallback_used"] is False
     assert result["live_search_result"] is None
@@ -560,7 +586,7 @@ async def test_routing_uses_configured_guardrail_threshold(threshold: int, passe
     assert result["terminal_reason"] == (None if passed else TerminalReason.OUT_OF_SCOPE)
 
 
-def test_graph_compilation_has_conditional_m07_topology() -> None:
+def test_graph_compilation_has_conditional_m08_topology() -> None:
     deps, _, _ = dependencies()
 
     graph = build_agent_graph(dependencies=deps).get_graph()
@@ -578,6 +604,8 @@ def test_graph_compilation_has_conditional_m07_topology() -> None:
         "live_document_processing",
         "evidence_rerank",
         "answer_generation",
+        "answer_grounding",
+        "grounding_failed",
         "insufficient_evidence",
         "graph_complete",
         "__end__",
@@ -606,7 +634,12 @@ def test_graph_compilation_has_conditional_m07_topology() -> None:
         ("evidence_rerank", "answer_generation", True),
         ("evidence_rerank", "insufficient_evidence", True),
         ("evidence_rerank", "__end__", True),
-        ("answer_generation", "graph_complete", True),
+        ("answer_generation", "answer_grounding", True),
+        ("answer_grounding", "graph_complete", True),
+        ("answer_grounding", "answer_generation", True),
+        ("answer_grounding", "grounding_failed", True),
+        ("answer_grounding", "__end__", True),
+        ("grounding_failed", "__end__", False),
         ("answer_generation", "insufficient_evidence", True),
         ("answer_generation", "__end__", True),
         ("live_document_processing", "insufficient_evidence", True),
@@ -662,7 +695,7 @@ async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_qu
     result = await run(deps, INDIA_QUESTION)
 
     assert statuses(result) == RETRY_SUFFICIENT_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(18))
+    assert [event.sequence for event in result["execution_events"]] == list(range(20))
     assert [call.args[0] for call in retrieval.search.call_args_list] == [INDIA_QUESTION, REWRITTEN]
     assert len(provider.calls) == 4
     guardrail_call, first_grade, rewrite, second_grade = provider.calls
@@ -695,7 +728,8 @@ async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_qu
     assert "attempt two evidence" in generation_prompt
     assert "attempt one evidence" not in generation_prompt
     assert result["generated_answer"] == ANSWER
-    assert result["grounding_passed"] is None
+    assert result["grounding_passed"] is True
+    assert result["grounding_attempts"] == 1
 
 
 @pytest.mark.anyio
@@ -937,7 +971,7 @@ async def test_live_candidates_are_selected_processed_and_stored_as_transient_ev
     result = await run(deps, INDIA_QUESTION)
 
     assert statuses(result) == LIVE_EVIDENCE_PATH
-    assert [event.sequence for event in result["execution_events"]] == list(range(24))
+    assert [event.sequence for event in result["execution_events"]] == list(range(26))
     assert S.GRAPH_COMPLETED not in statuses(result)[:-1]
     deps.live_search_service.search.assert_awaited_once_with(
         REWRITTEN, max_results=5, exclude_arxiv_ids=("2401.00001",)
@@ -978,13 +1012,14 @@ async def test_live_candidates_are_selected_processed_and_stored_as_transient_ev
         "live_arxiv",
         "live_arxiv",
     ]
-    assert result["grounding_passed"] is None
-    assert result["execution_events"][19:23] == result["execution_events"][-5:-1]
+    assert result["grounding_passed"] is True
+    assert len(provider.grounding_calls) == 1
+    assert result["execution_events"][19:23] == result["execution_events"][-7:-3]
     assert [event.metadata.model_dump(exclude_none=True) for event in result["execution_events"][19:23]] == [
         {"local_candidate_count": 1, "live_candidate_count": 2, "merged_candidate_count": 3},
         {"local_candidate_count": 1, "live_candidate_count": 2, "merged_candidate_count": 3, "final_source_count": 3},
-        {"final_source_count": 3},
-        {"final_source_count": 3, "prompt_tokens": 111, "completion_tokens": 22},
+        {"generation_attempt": 1, "final_source_count": 3},
+        {"generation_attempt": 1, "final_source_count": 3, "prompt_tokens": 111, "completion_tokens": 22},
     ]
     metadata = [event.metadata.model_dump(exclude_none=True) for event in result["execution_events"][13:19]]
     assert metadata == [
@@ -1502,8 +1537,8 @@ async def test_source_specific_state_is_preserved_alongside_final_evidence() -> 
     assert result["generation_result"].completion_tokens == 22
     assert result["terminal_reason"] is None
     assert result["error_category"] is None
-    assert result["grounding_passed"] is None
-    assert result["grounding_attempts"] == 0
+    assert result["grounding_passed"] is True
+    assert result["grounding_attempts"] == 1
 
 
 @pytest.mark.anyio
@@ -1630,6 +1665,375 @@ async def test_generation_runs_once_and_reuses_the_existing_rag_prompt_and_limit
     assert statuses(result).count(S.GENERATION_STARTED) == 1
 
 
+LOW, HIGH = '{"score":30}', '{"score":88}'
+
+
+def generation_user_prompt(call) -> str:
+    return call[0][1].content
+
+
+def grounding_payload(call) -> dict:
+    return json.loads(call[0][1].content.split("\n", 1)[1])
+
+
+@pytest.mark.anyio
+async def test_first_grounding_pass_completes_without_regeneration() -> None:
+    deps, provider, retrieval = dependencies(llm=FakeLLMProvider(grounding=HIGH))
+
+    result = await run(deps, "How is NLP used in clinical decision support?")
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *GROUNDED, S.GRAPH_COMPLETED]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 1)
+    assert provider.grounding_calls[0][1] == {"temperature": 0.0, "max_tokens": 32}
+    assert result["grounding_attempts"] == 1
+    assert result["grounding_passed"] is True
+    assert result["grounding_result"] == AnswerGroundingResult(score=88, passed=True)
+    assert result["generated_answer"] == ANSWER
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    grounding_events = result["execution_events"][11:13]
+    assert [event.metadata.model_dump(exclude_none=True) for event in grounding_events] == [
+        {"grounding_attempt": 1, "final_source_count": 1},
+        {"grounding_attempt": 1, "grounding_score": 88, "grounding_passed": True},
+    ]
+
+
+@pytest.mark.anyio
+async def test_grounding_grades_the_answer_against_the_sources_sent_to_generation() -> None:
+    hits = [
+        make_hit("c1", "first " + "alpha " * 40),
+        make_hit("c2", "second " + "beta " * 40),
+        make_hit("c3", "third " + "omega " * 400),
+        make_hit("c4", "fourth passage never sent"),
+        make_hit("c5", "fifth passage never sent"),
+    ]
+    deps, provider, _ = dependencies(result=retrieval_result(hits=hits), max_context_tokens=260)
+    question = "How is NLP used in clinical decision support?"
+
+    result = await run(deps, question)
+
+    assert len(result["final_evidence"]) == 5
+    sent_to_generation = result["generation_result"].sources
+    assert [source.label for source in sent_to_generation] == ["[S1]", "[S2]", "[S3]"]
+    assert sent_to_generation[2].truncated is True
+    payload = grounding_payload(provider.grounding_calls[0])
+    assert payload["original_question"] == question
+    assert payload["generated_answer"] == ANSWER
+    assert [source["label"] for source in payload["sources"]] == ["[S1]", "[S2]", "[S3]"]
+    assert [source["content"] for source in payload["sources"]] == [source.content for source in sent_to_generation]
+    assert "never sent" not in provider.grounding_calls[0][0][1].content
+    assert result["execution_events"][11].metadata.final_source_count == 3
+    assert result["execution_events"][9].metadata.final_source_count == 5
+
+
+@pytest.mark.anyio
+async def test_failed_grounding_regenerates_once_from_the_same_evidence_then_passes() -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, HIGH))
+    deps, provider, retrieval = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *REGENERATE_PASS_TAIL]
+    assert [event.sequence for event in result["execution_events"]] == list(range(18))
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 2)
+    assert len(provider.calls) == 2
+    retrieval.search.assert_called_once()
+    assert len(deps.embedding_provider.passage_batches) == 1
+    assert result["grounding_attempts"] == 2
+    assert result["grounding_passed"] is True
+    assert result["grounding_result"] == AnswerGroundingResult(score=88, passed=True)
+    assert result["generated_answer"] == REGENERATED_ANSWER
+    assert result["generation_result"].answer == REGENERATED_ANSWER
+    assert ANSWER not in repr({key: value for key, value in result.items() if key != "execution_events"})
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+
+    first_prompt, second_prompt = (generation_user_prompt(call) for call in provider.generation_calls)
+    assert second_prompt.startswith(first_prompt)
+    assert "BEGIN PREVIOUS ANSWER (untrusted data)\n" + ANSWER in second_prompt
+    assert "PREVIOUS ANSWER" not in first_prompt
+    assert provider.generation_calls[0][0][0] == provider.generation_calls[1][0][0]
+    assert provider.generation_calls[0][1] == provider.generation_calls[1][1]
+    first_grade, second_grade = (grounding_payload(call) for call in provider.grounding_calls)
+    assert first_grade["generated_answer"] == ANSWER
+    assert second_grade["generated_answer"] == REGENERATED_ANSWER
+    assert first_grade["sources"] == second_grade["sources"]
+
+    tail = [(event.status, event.metadata.model_dump(exclude_none=True)) for event in result["execution_events"][9:17]]
+    assert tail == [
+        (S.GENERATION_STARTED, {"generation_attempt": 1, "final_source_count": 1}),
+        (
+            S.GENERATION_COMPLETED,
+            {"generation_attempt": 1, "final_source_count": 1, "prompt_tokens": 111, "completion_tokens": 22},
+        ),
+        (S.GROUNDING_STARTED, {"grounding_attempt": 1, "final_source_count": 1}),
+        (S.GROUNDING_FAILED, {"grounding_attempt": 1, "grounding_score": 30, "grounding_passed": False}),
+        (S.GENERATION_STARTED, {"generation_attempt": 2, "final_source_count": 1}),
+        (
+            S.GENERATION_COMPLETED,
+            {"generation_attempt": 2, "final_source_count": 1, "prompt_tokens": 111, "completion_tokens": 22},
+        ),
+        (S.GROUNDING_STARTED, {"grounding_attempt": 2, "final_source_count": 1}),
+        (S.GROUNDING_PASSED, {"grounding_attempt": 2, "grounding_score": 88, "grounding_passed": True}),
+    ]
+
+
+@pytest.mark.anyio
+async def test_grounding_failing_twice_ends_as_grounding_failed_without_a_third_attempt() -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, '{"score":45}', HIGH))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *REGENERATE_FAIL_TAIL]
+    assert S.GRAPH_FAILED not in statuses(result)
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 2)
+    assert result["grounding_attempts"] == 2
+    assert result["grounding_passed"] is False
+    assert result["grounding_result"] == AnswerGroundingResult(score=45, passed=False)
+    assert result["generated_answer"] == REGENERATED_ANSWER
+    assert result["terminal_reason"] == TerminalReason.GROUNDING_FAILED
+    assert result["error_category"] is None
+
+
+@pytest.mark.anyio
+async def test_single_grounding_attempt_config_fails_without_regeneration() -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(grounding=LOW))
+
+    result = await run(deps, config=AgentGraphConfig(max_grounding_attempts=1))
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *UNGROUNDED, S.GRAPH_COMPLETED]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 1)
+    assert result["grounding_attempts"] == 1
+    assert result["grounding_passed"] is False
+    assert result["terminal_reason"] == TerminalReason.GROUNDING_FAILED
+    assert result["error_category"] is None
+
+
+@pytest.mark.anyio
+async def test_grounding_attempts_follow_configuration_and_never_exceed_it() -> None:
+    llm = FakeLLMProvider(answer=("First [S1].", "Second [S1].", "Third [S1].", "Fourth [S1]."), grounding=LOW)
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps, config=AgentGraphConfig(max_grounding_attempts=3))
+
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (3, 3)
+    assert result["grounding_attempts"] == 3
+    assert result["generated_answer"] == "Third [S1]."
+    assert result["terminal_reason"] == TerminalReason.GROUNDING_FAILED
+    assert "BEGIN PREVIOUS ANSWER (untrusted data)\nSecond [S1]." in generation_user_prompt(provider.generation_calls[2])
+    assert "First [S1]." not in generation_user_prompt(provider.generation_calls[2])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("threshold", "passed"), [(88, True), (89, False)])
+async def test_routing_uses_configured_grounding_threshold(threshold: int, passed: bool) -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(grounding=HIGH))
+    config = AgentGraphConfig(answer_grounding_threshold=threshold, max_grounding_attempts=1)
+
+    result = await run(deps, config=config)
+
+    assert result["grounding_passed"] is passed
+    assert result["terminal_reason"] == (None if passed else TerminalReason.GROUNDING_FAILED)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "grounding",
+    [RuntimeError("private grounding detail"), "private grounding detail, not json", '{"score":87,"why":"private grounding detail"}'],
+)
+async def test_grounding_grader_execution_failure_is_not_a_low_score(grounding) -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(grounding=grounding))
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, S.GROUNDING_STARTED, S.GRAPH_FAILED]
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 1)
+    assert result["grounding_attempts"] == 1
+    assert result["grounding_passed"] is None
+    assert result["grounding_result"] is None
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.ANSWER_GROUNDING_FAILURE
+    assert "private grounding detail" not in repr(
+        {key: value for key, value in result.items() if key != "local_retrieval_result"}
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "regenerated",
+    [
+        RuntimeError("private regeneration detail"),
+        "Private regeneration detail with unknown label [S9].",
+        "Private regeneration detail with malformed label [S0].",
+        "Private regeneration detail without any citation.",
+    ],
+)
+async def test_regeneration_failure_is_generation_failure_without_second_grounding(regenerated) -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, regenerated), grounding=(LOW, HIGH))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *UNGROUNDED, S.GENERATION_STARTED, S.GRAPH_FAILED]
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 1)
+    assert result["grounding_attempts"] == 1
+    assert result["grounding_passed"] is False
+    assert result["generated_answer"] is None
+    assert result["generation_result"] is None
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.GENERATION_FAILURE
+    serialized = repr({key: value for key, value in result.items() if key != "local_retrieval_result"})
+    assert "rivate regeneration detail" not in serialized
+    assert ANSWER not in serialized
+
+
+@pytest.mark.anyio
+async def test_regeneration_on_the_live_path_reuses_evidence_and_makes_no_new_retrieval_or_rerank() -> None:
+    candidates = live_result("2501.00001", "2501.00002")
+    first = retrieval_result(hits=[make_hit("a1", "attempt one evidence")])
+    second = retrieval_result(hits=[make_hit("b1", "attempt two evidence")])
+    llm = FakeLLMProvider(
+        '{"score":90}',
+        '{"score":25}',
+        REWRITE_JSON,
+        '{"score":40}',
+        SELECT_TWO,
+        answer=(ANSWER, REGENERATED_ANSWER),
+        grounding=(LOW, HIGH),
+    )
+    deps, provider, retrieval = dependencies(llm=llm, results=[first, second], live=candidates)
+
+    result = await run(deps, INDIA_QUESTION)
+
+    assert statuses(result) == [*LIVE_PROCESSED, *REGENERATE_PASS_TAIL]
+    assert retrieval.search.call_count == 2
+    assert len(provider.calls) == 5
+    assert statuses(result).count(S.QUERY_REWRITTEN) == 1
+    deps.live_search_service.search.assert_awaited_once()
+    deps.live_document_processor.process.assert_awaited_once()
+    assert len(deps.embedding_provider.queries) == 1
+    assert len(deps.embedding_provider.passage_batches) == 1
+    assert statuses(result).count(S.EVIDENCE_RERANK_STARTED) == 1
+    assert result["retrieval_attempts"] == 2
+
+    first_prompt, second_prompt = (generation_user_prompt(call) for call in provider.generation_calls)
+    evidence_block = first_prompt[first_prompt.index("BEGIN RETRIEVED EVIDENCE") : first_prompt.index("END RETRIEVED EVIDENCE")]
+    assert evidence_block in second_prompt
+    assert second_prompt.count("[S1] ") == first_prompt.count("[S1] ") == 1
+    first_grade, second_grade = (grounding_payload(call) for call in provider.grounding_calls)
+    assert first_grade["sources"] == second_grade["sources"]
+    assert [source["label"] for source in second_grade["sources"]] == ["[S1]", "[S2]", "[S3]"]
+    assert first_grade["original_question"] == second_grade["original_question"] == INDIA_QUESTION
+    assert [source.source_type for source in result["generation_result"].sources] == ["local", "live_arxiv", "live_arxiv"]
+    assert result["generated_answer"] == REGENERATED_ANSWER
+    assert result["grounding_passed"] is True
+
+
+@pytest.mark.anyio
+async def test_citation_free_insufficiency_answer_can_pass_grounding() -> None:
+    answer = "The available evidence is insufficient to answer the question."
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(answer=answer, grounding=HIGH))
+
+    result = await run(deps)
+
+    assert statuses(result) == SUFFICIENT_PATH
+    assert result["generation_result"].cited_labels == ()
+    assert grounding_payload(provider.grounding_calls[0])["generated_answer"] == answer
+    assert result["grounding_passed"] is True
+    assert result["generated_answer"] == answer
+    assert result["terminal_reason"] is None
+    assert len(provider.generation_calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("attempts", "maximum"), [(2, 2), (1, 1), (5, 2)])
+async def test_grounding_node_refuses_to_exceed_configured_attempts(attempts: int, maximum: int) -> None:
+    deps, provider, _ = dependencies()
+    state = create_initial_agent_state("AI question")
+    state["grounding_attempts"] = attempts
+    state["generated_answer"] = "Seeded previous answer [S1]."
+    config = AgentGraphConfig(max_grounding_attempts=maximum)
+
+    result = await build_agent_graph(dependencies=deps, config=config).ainvoke(state)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, S.GRAPH_FAILED]
+    assert provider.grounding_calls == []
+    assert len(provider.generation_calls) == 1
+    assert result["grounding_attempts"] == attempts
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.INTERNAL_FAILURE
+
+
+@pytest.mark.anyio
+async def test_stale_grounding_decision_is_cleared_when_the_answer_is_regenerated() -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, HIGH))
+    deps, _, _ = dependencies(llm=llm)
+    graph = build_agent_graph(dependencies=deps)
+
+    snapshots = {}
+    async for state in graph.astream(create_initial_agent_state("AI question"), stream_mode="values"):
+        if state["execution_events"]:
+            snapshots[len(state["execution_events"])] = state
+
+    after_first_grade = snapshots[len(LOCAL_SUFFICIENT) + len(GENERATED) + 2]
+    assert after_first_grade["generated_answer"] == ANSWER
+    assert after_first_grade["grounding_passed"] is False
+    assert after_first_grade["grounding_result"].score == 30
+
+    after_regeneration = snapshots[len(LOCAL_SUFFICIENT) + len(GENERATED) + 4]
+    assert after_regeneration["generated_answer"] == REGENERATED_ANSWER
+    assert after_regeneration["grounding_attempts"] == 1
+    assert after_regeneration["grounding_passed"] is None
+    assert after_regeneration["grounding_result"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "grounding",
+    [
+        HIGH,
+        (LOW, HIGH),
+        (LOW, LOW),
+        '{"score":88,"reasoning":"secret grounding rationale"}',
+        RuntimeError("secret grounding rationale"),
+    ],
+)
+async def test_grounding_and_regeneration_events_are_deterministic_and_content_free(grounding) -> None:
+    question = "How is NLP used in clinical decision support?"
+
+    async def events():
+        llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=grounding)
+        deps, _, _ = dependencies(llm=llm)
+        result = await run(deps, question)
+        return [event.model_dump(mode="json") for event in result["execution_events"]]
+
+    first, second = await events(), await events()
+
+    assert first == second
+    serialized = repr(first)
+    for forbidden in (
+        question,
+        EVIDENCE_TEXT,
+        "Private Paper Title",
+        ANSWER,
+        REGENERATED_ANSWER,
+        "Private generated",
+        "Private regenerated",
+        "UNTRUSTED_GROUNDING_INPUT_JSON",
+        "answer-grounding grader",
+        "PREVIOUS ANSWER",
+        "insufficiently grounded",
+        '{"score"',
+        "secret grounding rationale",
+        "local-v1",
+        "fake-model",
+    ):
+        assert forbidden not in serialized
+
+
 def scenario_dependencies():
     """One (dependencies, config) pair per distinct graph path."""
     return [
@@ -1658,6 +2062,12 @@ def scenario_dependencies():
         (dependencies(embedding=FakeEmbeddingProvider(error=RuntimeError("down")))[0], None),
         (dependencies(llm=FakeLLMProvider(answer=RuntimeError("down")))[0], None),
         (dependencies(llm=FakeLLMProvider(answer="No citation here."))[0], None),
+        (dependencies(llm=FakeLLMProvider(grounding=LOW))[0], None),
+        (dependencies(llm=FakeLLMProvider(grounding=(LOW, HIGH)))[0], None),
+        (dependencies(llm=FakeLLMProvider(grounding="invalid"))[0], None),
+        (dependencies(llm=FakeLLMProvider(grounding=(LOW, RuntimeError("down"))))[0], None),
+        (dependencies(llm=FakeLLMProvider(answer=(ANSWER, RuntimeError("down")), grounding=LOW))[0], None),
+        (dependencies(llm=FakeLLMProvider(grounding=LOW))[0], AgentGraphConfig(max_grounding_attempts=1)),
     ]
 
 
@@ -1675,10 +2085,13 @@ async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequence
         assert path.count(S.LIVE_SELECTION_STARTED) <= 1
         assert path.count(S.LIVE_DOCUMENT_PROCESSING_STARTED) <= 1
         assert path.count(S.EVIDENCE_RERANK_STARTED) <= 1
-        assert path.count(S.GENERATION_STARTED) <= 1
-        assert (S.GENERATION_COMPLETED in path) == (result["generated_answer"] is not None)
-        assert S.GROUNDING_STARTED not in path
-        assert result["grounding_passed"] is None
+        assert path.count(S.GENERATION_STARTED) <= 2
+        assert path.count(S.GROUNDING_STARTED) <= 2
+        assert result["grounding_attempts"] == path.count(S.GROUNDING_STARTED) <= 2
+        assert (result["generated_answer"] is not None) == (result["generation_result"] is not None)
+        if S.GROUNDING_PASSED in path:
+            assert path[-3:] == [S.GROUNDING_STARTED, S.GROUNDING_PASSED, S.GRAPH_COMPLETED]
+            assert result["grounding_passed"] is True
         assert result["retrieval_attempts"] <= 2
 
 

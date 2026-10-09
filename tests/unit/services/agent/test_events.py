@@ -41,6 +41,9 @@ def test_execution_event_has_deterministic_representation() -> None:
             "evidence_sufficient": None,
             "evidence_score": None,
             "grounding_passed": None,
+            "grounding_attempt": None,
+            "grounding_score": None,
+            "generation_attempt": None,
         },
     }
 
@@ -159,3 +162,21 @@ def test_rerank_vocabulary_is_distinct_from_grading_and_generation() -> None:
     assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE.value == "evidence_rerank_failure"
     assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE is not AgentErrorCategory.EVIDENCE_GRADING_FAILURE
     assert AgentErrorCategory.EVIDENCE_RERANK_FAILURE is not AgentErrorCategory.GENERATION_FAILURE
+
+
+def test_grounding_metadata_is_bounded_and_content_free() -> None:
+    metadata = AgentExecutionMetadata(grounding_attempt=2, grounding_score=0, grounding_passed=False, generation_attempt=2)
+
+    assert (metadata.grounding_attempt, metadata.grounding_score, metadata.generation_attempt) == (2, 0, 2)
+    for invalid in ({"grounding_attempt": 0}, {"generation_attempt": 0}, {"grounding_score": -1}, {"grounding_score": 101}):
+        with pytest.raises(ValidationError):
+            AgentExecutionMetadata(**invalid)
+    for forbidden in ("answer", "previous_answer", "rationale", "claims"):
+        with pytest.raises(ValidationError):
+            AgentExecutionMetadata(**{forbidden: "private"})
+
+
+def test_semantic_grounding_failure_and_grader_failure_use_different_vocabularies() -> None:
+    assert TerminalReason.GROUNDING_FAILED.value == "grounding_failed"
+    assert AgentErrorCategory.ANSWER_GROUNDING_FAILURE.value == "answer_grounding_failure"
+    assert AgentErrorCategory.ANSWER_GROUNDING_FAILURE is not AgentErrorCategory.GENERATION_FAILURE

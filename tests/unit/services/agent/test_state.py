@@ -26,6 +26,7 @@ def test_initial_state_preserves_question_and_initializes_future_fields() -> Non
     assert state["generation_result"] is None
     assert state["generated_answer"] is None
     assert state["grounding_passed"] is None
+    assert state["grounding_result"] is None
     assert state["terminal_reason"] is None
     assert state["error_category"] is None
     assert state["execution_events"] == []

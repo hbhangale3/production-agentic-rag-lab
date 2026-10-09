@@ -63,6 +63,9 @@ class AgentExecutionMetadata(BaseModel):
     evidence_sufficient: bool | None = None
     evidence_score: int | None = Field(default=None, ge=0, le=100)
     grounding_passed: bool | None = None
+    grounding_attempt: int | None = Field(default=None, ge=1)
+    grounding_score: int | None = Field(default=None, ge=0, le=100)
+    generation_attempt: int | None = Field(default=None, ge=1)
 
 
 class AgentExecutionEvent(BaseModel):

@@ -1,5 +1,11 @@
 """Foundation contracts for the bounded Week 7 LangGraph workflow."""
 
+from src.services.agent.answer_grounding import (
+    AnswerGroundingError,
+    AnswerGroundingGrader,
+    AnswerGroundingPromptBuilder,
+    AnswerGroundingResult,
+)
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import (
@@ -61,6 +67,10 @@ __all__ = [
     "AgentGraphConfig",
     "AgentGraphDependencies",
     "AgentState",
+    "AnswerGroundingError",
+    "AnswerGroundingGrader",
+    "AnswerGroundingPromptBuilder",
+    "AnswerGroundingResult",
     "ArxivLiveSearchService",
     "EvidenceGrade",
     "EvidenceGraderPromptBuilder",
