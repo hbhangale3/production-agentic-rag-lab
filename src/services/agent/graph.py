@@ -4,13 +4,18 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from src.exceptions import InsufficientEvidenceError
-from src.services.agent.answer_grounding import AnswerGroundingGrader
+from src.services.agent.answer_grounding import AnswerGroundingGrader, AnswerGroundingPromptBuilder
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
-from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
+from src.services.agent.evidence_grader import (
+    EvidenceGraderPromptBuilder,
+    EvidenceGradingError,
+    EvidenceSufficiencyGrader,
+)
 from src.services.agent.final_evidence import (
     FinalEvidenceSelector,
     merge_evidence,
@@ -18,18 +23,30 @@ from src.services.agent.final_evidence import (
     normalize_local_evidence,
     to_evidence_inputs,
 )
-from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator
+from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator, GuardrailPromptBuilder
 from src.services.agent.live_documents import LiveDocumentProcessor
 from src.services.agent.live_search import LiveArxivSearchResult, LiveResearchSearchService
-from src.services.agent.live_selection import LivePaperSelector, LiveSelectionError
-from src.services.agent.query_rewriter import QueryRewriteError, QueryRewriter
+from src.services.agent.live_selection import (
+    LivePaperSelectionPromptBuilder,
+    LivePaperSelector,
+    LiveSelectionError,
+)
+from src.services.agent.prompts import AgentPromptBundle, AgentPromptIdentityBundle, local_agent_prompt_bundle
+from src.services.agent.query_rewriter import QueryRewriteError, QueryRewritePromptBuilder, QueryRewriter
 from src.services.agent.state import AgentState
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 from src.services.embeddings.base import EmbeddingProvider
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm import LLMProvider
+from src.services.observability.base import Observation
+from src.services.observability.generation import LLMTelemetry
+from src.services.observability.safe import SafeObservation
+from src.services.rag.prompt import RAGPromptBuilder
 from src.services.rag.service import RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
+
+# Pass a request observation as ``config={"configurable": {AGENT_OBSERVATION_KEY: observation}}``.
+AGENT_OBSERVATION_KEY = "observation"
 
 GuardrailRoute = Literal["passed", "rejected", "failed"]
 RetrievalRoute = Literal["retrieved", "failed"]
@@ -54,26 +71,42 @@ class AgentGraphDependencies:
     rag_generation_service: RAGGenerationService
     live_search_service: LiveResearchSearchService | None = None
     live_document_processor: LiveDocumentProcessor | None = None
+    llm_telemetry: LLMTelemetry | None = None
 
 
 def _next_sequence(state: AgentState) -> int:
     return len(state["execution_events"])
 
 
-def _start_graph(state: AgentState) -> dict[str, Any]:
-    return {
-        "execution_events": [
-            AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_STARTED, sequence=_next_sequence(state))
-        ]
-    }
+def _observation(config: RunnableConfig | None) -> Observation | None:
+    """The caller's request observation, wrapped so telemetry can never fail a node."""
+
+    observation = ((config or {}).get("configurable") or {}).get(AGENT_OBSERVATION_KEY)
+    return SafeObservation(observation) if observation is not None else None
 
 
-def _make_guardrail_node(evaluator: GuardrailEvaluator, config: AgentGraphConfig):
-    async def guardrail(state: AgentState) -> dict[str, Any]:
+def _make_start_node(prompt_identities: AgentPromptIdentityBundle):
+    def graph_start(state: AgentState) -> dict[str, Any]:
+        return {
+            "prompt_identities": prompt_identities,
+            "execution_events": [
+                AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_STARTED, sequence=_next_sequence(state))
+            ],
+        }
+
+    return graph_start
+
+
+def _make_guardrail_node(evaluator: GuardrailEvaluator, graph_config: AgentGraphConfig):
+    async def guardrail(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
         started = AgentExecutionEvent(status=AgentExecutionStatus.GUARDRAIL_STARTED, sequence=sequence)
         try:
-            result = await evaluator.evaluate(state["original_question"], threshold=config.guardrail_threshold)
+            result = await evaluator.evaluate(
+                state["original_question"],
+                threshold=graph_config.guardrail_threshold,
+                observation=_observation(config),
+            )
         except GuardrailEvaluationError:
             return {
                 "execution_events": [
@@ -180,9 +213,9 @@ def _route_after_local_retrieval(state: AgentState) -> RetrievalRoute:
 def _make_evidence_grading_node(
     grader: EvidenceSufficiencyGrader,
     context_builder: EvidenceContextBuilder,
-    config: AgentGraphConfig,
+    graph_config: AgentGraphConfig,
 ):
-    async def evidence_grading(state: AgentState) -> dict[str, Any]:
+    async def evidence_grading(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
         attempt = state["retrieval_attempts"]
 
@@ -216,7 +249,9 @@ def _make_evidence_grading_node(
             grade = await grader.grade(
                 state["original_question"],
                 context,
-                threshold=config.evidence_sufficiency_threshold,
+                threshold=graph_config.evidence_sufficiency_threshold,
+                observation=_observation(config),
+                observation_metadata={"retrieval_attempt": attempt},
             )
         except EvidenceGradingError:
             return failed(started)
@@ -258,7 +293,7 @@ def _make_evidence_router(config: AgentGraphConfig):
 
 
 def _make_query_rewrite_node(rewriter: QueryRewriter):
-    async def query_rewrite(state: AgentState) -> dict[str, Any]:
+    async def query_rewrite(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
         attempt = state["retrieval_attempts"]
         metadata = AgentExecutionMetadata(retrieval_attempt=attempt, next_retrieval_attempt=attempt + 1)
@@ -268,7 +303,12 @@ def _make_query_rewrite_node(rewriter: QueryRewriter):
             metadata=metadata,
         )
         try:
-            result = await rewriter.rewrite(state["original_question"], state["current_query"])
+            result = await rewriter.rewrite(
+                state["original_question"],
+                state["current_query"],
+                observation=_observation(config),
+                observation_metadata={"retrieval_attempt": attempt},
+            )
         except QueryRewriteError:
             return {
                 "execution_events": [
@@ -358,8 +398,8 @@ def _route_after_live_search(state: AgentState) -> LiveSearchRoute:
     return "candidates" if state["live_search_result"].count else "empty"
 
 
-def _make_live_selection_node(selector: LivePaperSelector, config: AgentGraphConfig):
-    async def live_paper_selection(state: AgentState) -> dict[str, Any]:
+def _make_live_selection_node(selector: LivePaperSelector, graph_config: AgentGraphConfig):
+    async def live_paper_selection(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
         candidates = state["live_search_result"].candidates
         started = AgentExecutionEvent(
@@ -371,7 +411,8 @@ def _make_live_selection_node(selector: LivePaperSelector, config: AgentGraphCon
             selection = await selector.select(
                 state["original_question"],
                 candidates,
-                max_papers=config.live_pdf_max_papers,
+                max_papers=graph_config.live_pdf_max_papers,
+                observation=_observation(config),
             )
         except LiveSelectionError:
             return {
@@ -382,7 +423,7 @@ def _make_live_selection_node(selector: LivePaperSelector, config: AgentGraphCon
                     AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
                 ],
             }
-        papers = selection.papers[: config.live_pdf_max_papers]
+        papers = selection.papers[: graph_config.live_pdf_max_papers]
         return {
             "live_selected_papers": papers,
             "execution_events": [
@@ -522,7 +563,7 @@ def _route_after_evidence_rerank(state: AgentState) -> RerankRoute:
 
 
 def _make_generation_node(service: RAGGenerationService, context_builder: EvidenceContextBuilder):
-    async def answer_generation(state: AgentState) -> dict[str, Any]:
+    async def answer_generation(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
         final = state["final_evidence"]
         local_result = state["local_retrieval_result"]
@@ -545,6 +586,8 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
                 question=state["original_question"],
                 evidence=evidence,
                 previous_answer=previous_answer,
+                observation=_observation(config),
+                generation_attempt=attempt,
             )
         except InsufficientEvidenceError:
             # Nothing fit the context budget: there is no evidence to answer from, which is not a failure.
@@ -591,10 +634,10 @@ def _route_after_generation(state: AgentState) -> GenerationRoute:
     return "generated" if state["generation_result"] is not None else "insufficient"
 
 
-def _make_answer_grounding_node(grader: AnswerGroundingGrader, config: AgentGraphConfig):
-    async def answer_grounding(state: AgentState) -> dict[str, Any]:
+def _make_answer_grounding_node(grader: AnswerGroundingGrader, graph_config: AgentGraphConfig):
+    async def answer_grounding(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         sequence = _next_sequence(state)
-        if state["grounding_attempts"] >= config.max_grounding_attempts:
+        if state["grounding_attempts"] >= graph_config.max_grounding_attempts:
             # Routing prevents this; the node still refuses to exceed the configured total.
             return {
                 "terminal_reason": TerminalReason.INTERNAL_ERROR,
@@ -616,7 +659,9 @@ def _make_answer_grounding_node(grader: AnswerGroundingGrader, config: AgentGrap
                 state["original_question"],
                 generation.answer,
                 generation.sources,
-                threshold=config.answer_grounding_threshold,
+                threshold=graph_config.answer_grounding_threshold,
+                observation=_observation(config),
+                observation_metadata={"grounding_attempt": attempt},
             )
         except Exception:
             return {
@@ -695,22 +740,52 @@ def build_agent_graph(
     *,
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
+    prompts: AgentPromptBundle | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M08 with injected services and no infrastructure creation."""
+    """Compile the agent with injected services and one resolved prompt bundle.
+
+    Every LLM step renders with ``prompts`` (local fallbacks when omitted), so a
+    cache key derived from ``prompts.identities`` describes exactly what runs.
+    """
 
     graph_config = config or AgentGraphConfig()
     if graph_config.live_fallback_enabled and dependencies.live_search_service is None:
         raise ValueError("live_search_service is required when live_fallback_enabled is true")
     if graph_config.live_fallback_enabled and dependencies.live_document_processor is None:
         raise ValueError("live_document_processor is required when live_fallback_enabled is true")
-    evaluator = GuardrailEvaluator(llm_provider=dependencies.llm_provider)
-    grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
-    rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
+    prompt_bundle = prompts or local_agent_prompt_bundle()
+    telemetry = dependencies.llm_telemetry or dependencies.rag_generation_service.telemetry
+    llm = dependencies.llm_provider
+    evaluator = GuardrailEvaluator(
+        llm_provider=llm,
+        prompt_builder=GuardrailPromptBuilder(prompt=prompt_bundle.guardrail),
+        telemetry=telemetry,
+    )
+    grader = EvidenceSufficiencyGrader(
+        llm_provider=llm,
+        prompt_builder=EvidenceGraderPromptBuilder(prompt=prompt_bundle.evidence_grader),
+        telemetry=telemetry,
+    )
+    rewriter = QueryRewriter(
+        llm_provider=llm,
+        prompt_builder=QueryRewritePromptBuilder(prompt=prompt_bundle.query_rewrite),
+        telemetry=telemetry,
+    )
+    generation_service = dependencies.rag_generation_service.with_prompt_builder(
+        RAGPromptBuilder(
+            generation_prompt=prompt_bundle.generation,
+            regeneration_prompt=prompt_bundle.regeneration,
+        )
+    )
     final_selector = FinalEvidenceSelector(embedding_provider=dependencies.embedding_provider)
-    grounding_grader = AnswerGroundingGrader(llm_provider=dependencies.llm_provider)
+    grounding_grader = AnswerGroundingGrader(
+        llm_provider=llm,
+        prompt_builder=AnswerGroundingPromptBuilder(prompt=prompt_bundle.answer_grounding),
+        telemetry=telemetry,
+    )
 
     builder = StateGraph(AgentState)
-    builder.add_node("graph_start", _start_graph)
+    builder.add_node("graph_start", _make_start_node(prompt_bundle.identities))
     builder.add_node("guardrail", _make_guardrail_node(evaluator, graph_config))
     builder.add_node("out_of_scope", _complete_out_of_scope)
     builder.add_node("local_retrieval", _make_local_retrieval_node(dependencies.hybrid_search_service, graph_config))
@@ -726,7 +801,11 @@ def build_agent_graph(
             _route_after_live_search,
             {"candidates": "live_paper_selection", "empty": "insufficient_evidence", "failed": END},
         )
-        selector = LivePaperSelector(llm_provider=dependencies.llm_provider)
+        selector = LivePaperSelector(
+            llm_provider=llm,
+            prompt_builder=LivePaperSelectionPromptBuilder(prompt=prompt_bundle.live_selector),
+            telemetry=telemetry,
+        )
         builder.add_node("live_paper_selection", _make_live_selection_node(selector, graph_config))
         builder.add_conditional_edges(
             "live_paper_selection",
@@ -750,7 +829,7 @@ def build_agent_graph(
     )
     builder.add_node(
         "answer_generation",
-        _make_generation_node(dependencies.rag_generation_service, dependencies.evidence_context_builder),
+        _make_generation_node(generation_service, dependencies.evidence_context_builder),
     )
     builder.add_conditional_edges(
         "answer_generation",

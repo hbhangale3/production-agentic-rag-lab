@@ -72,6 +72,12 @@ class Settings(DefaultSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_capture_content: bool = False
     langfuse_timeout_seconds: int = Field(default=5, gt=0, le=30)
+    langfuse_prompt_management_enabled: bool = False
+    langfuse_prompt_label: str = Field(default="production", min_length=1, pattern=r".*\S.*")
+    langfuse_prompt_cache_ttl_seconds: int = Field(default=60, ge=0)
+    # Token prices in US dollars per million tokens. Cost is reported only when both are set.
+    llm_input_cost_per_million_tokens: float | None = Field(default=None, ge=0)
+    llm_output_cost_per_million_tokens: float | None = Field(default=None, ge=0)
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"

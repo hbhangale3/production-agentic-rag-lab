@@ -10,6 +10,7 @@ from src.services.agent.events import AgentExecutionEvent
 from src.services.agent.final_evidence import AgentEvidenceCandidate
 from src.services.agent.live_documents import TransientLiveEvidenceChunk
 from src.services.agent.live_search import LiveArxivPaper, LiveArxivSearchResult
+from src.services.agent.prompt_identity import AgentPromptIdentityBundle
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 from src.services.evidence import EvidenceSource
 from src.services.rag.service import RAGGenerationResult
@@ -56,6 +57,7 @@ class AgentState(TypedDict):
     grounding_passed: bool | None
     grounding_result: AnswerGroundingResult | None
     grounding_attempts: int
+    prompt_identities: AgentPromptIdentityBundle | None
     execution_events: Annotated[list[AgentExecutionEvent], operator.add]
     terminal_reason: TerminalReason | None
     error_category: AgentErrorCategory | None
@@ -87,6 +89,7 @@ def create_initial_agent_state(question: str) -> AgentState:
         grounding_passed=None,
         grounding_result=None,
         grounding_attempts=0,
+        prompt_identities=None,
         execution_events=[],
         terminal_reason=None,
         error_category=None,

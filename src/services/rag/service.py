@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -8,8 +9,31 @@ from src.schemas.hybrid_search import HybridSearchResult
 from src.services.evidence import EvidenceContext, EvidenceContextBuilder, EvidenceSource, TokenCounter
 from src.services.llm.base import ChatMessage, LLMProvider
 from src.services.observability import Observation
+from src.services.observability.base import TokenCostRates
+from src.services.observability.generation import (
+    LLMTelemetry,
+    fail_generation_observation,
+    finish_generation_observation,
+    start_generation_observation,
+)
+from src.services.prompts.base import PromptIdentity
 from src.services.rag.prompt import RAGPromptBuilder
 from src.services.rag.validation import FULLWIDTH_CITATION, GroundedAnswerValidator
+
+RAG_GENERATION_OBSERVATION = "rag.generation"
+RAG_REGENERATION_OBSERVATION = "rag.regeneration"
+
+
+def llm_telemetry_from_settings(settings: object) -> LLMTelemetry:
+    """Provider name plus token prices, the latter only when both are explicitly configured."""
+    input_rate = getattr(settings, "llm_input_cost_per_million_tokens", None)
+    output_rate = getattr(settings, "llm_output_cost_per_million_tokens", None)
+    rates = (
+        TokenCostRates(input_per_million=input_rate, output_per_million=output_rate)
+        if input_rate is not None and output_rate is not None
+        else None
+    )
+    return LLMTelemetry(provider_name=getattr(settings, "llm_provider", None), cost_rates=rates)
 
 
 @dataclass(frozen=True)
@@ -33,6 +57,8 @@ class PreparedRAGGeneration:
     sources: tuple[EvidenceSource, ...]
     retrieval_mode: str
     estimated_prompt_tokens: int
+    prompt_identity: PromptIdentity | None = None
+    regeneration: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,6 +89,7 @@ class RAGGenerationService:
         token_safety_margin: int = 256,
         token_counter: TokenCounter | None = None,
         answer_validator: GroundedAnswerValidator | None = None,
+        telemetry: LLMTelemetry | None = None,
     ) -> None:
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2:
             raise ValueError("temperature must be between 0 and 2")
@@ -82,6 +109,13 @@ class RAGGenerationService:
         self.token_safety_margin = token_safety_margin
         self.token_counter = token_counter or evidence_builder.token_counter
         self.answer_validator = answer_validator or GroundedAnswerValidator()
+        self.telemetry = telemetry or LLMTelemetry()
+
+    def with_prompt_builder(self, prompt_builder: RAGPromptBuilder) -> "RAGGenerationService":
+        """Return an otherwise identical service that renders with ``prompt_builder``."""
+        service = copy.copy(self)
+        service.prompt_builder = prompt_builder
+        return service
 
     @classmethod
     def from_settings(
@@ -100,6 +134,7 @@ class RAGGenerationService:
             max_completion_tokens=getattr(settings, "llm_max_completion_tokens"),
             context_window_tokens=getattr(settings, "llm_context_window_tokens"),
             token_safety_margin=getattr(settings, "llm_token_safety_margin"),
+            telemetry=llm_telemetry_from_settings(settings),
         )
 
     async def generate(
@@ -123,6 +158,7 @@ class RAGGenerationService:
         evidence: EvidenceContext,
         observation: Observation | None = None,
         previous_answer: str | None = None,
+        generation_attempt: int | None = None,
     ) -> RAGGenerationResult:
         """Generate from an already-built context using the same prompt, budget, and validation.
 
@@ -135,23 +171,26 @@ class RAGGenerationService:
             observation=observation,
             previous_answer=previous_answer,
         )
-        return await self._generate_prepared(prepared, observation=observation)
+        return await self._generate_prepared(
+            prepared,
+            observation=observation,
+            generation_attempt=generation_attempt,
+        )
 
     async def _generate_prepared(
         self,
         prepared: PreparedRAGGeneration,
         *,
         observation: Observation | None,
+        generation_attempt: int | None = None,
     ) -> RAGGenerationResult:
-        generation_span = self._start_span(
+        generation = self._start_generation(
             observation,
-            "rag.generation",
-            {
-                "streaming": False,
-                "temperature": self.temperature,
-                "max_completion_tokens": self.max_completion_tokens,
-            },
+            prepared,
+            streaming=False,
+            generation_attempt=generation_attempt,
         )
+        started_at = self.telemetry.clock()
         try:
             completion = await self.llm_provider.complete(
                 prepared.messages,
@@ -159,15 +198,17 @@ class RAGGenerationService:
                 max_tokens=self.max_completion_tokens,
             )
         except Exception as exc:
-            self._finish_span(generation_span, error_type=type(exc).__name__)
+            fail_generation_observation(
+                generation, telemetry=self.telemetry, started_at=started_at, error_type=type(exc).__name__
+            )
             raise
-        self._finish_span(
-            generation_span,
-            metadata={
-                "model": completion.model,
-                "prompt_tokens": completion.prompt_tokens,
-                "completion_tokens": completion.completion_tokens,
-            },
+        finish_generation_observation(
+            generation,
+            telemetry=self.telemetry,
+            started_at=started_at,
+            model=completion.model,
+            prompt_tokens=completion.prompt_tokens,
+            completion_tokens=completion.completion_tokens,
         )
 
         grounding_span = self._start_span(
@@ -299,6 +340,10 @@ class RAGGenerationService:
             sources=evidence.sources,
             retrieval_mode=evidence.retrieval_mode,
             estimated_prompt_tokens=estimated_prompt_tokens,
+            prompt_identity=(
+                self.prompt_builder.identity if previous_answer is None else self.prompt_builder.regeneration_identity
+            ),
+            regeneration=previous_answer is not None,
         )
 
     async def stream_generate(
@@ -313,15 +358,8 @@ class RAGGenerationService:
         model: str | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
-        generation_span = self._start_span(
-            observation,
-            "rag.generation",
-            {
-                "streaming": True,
-                "temperature": self.temperature,
-                "max_completion_tokens": self.max_completion_tokens,
-            },
-        )
+        generation_span = self._start_generation(observation, prepared, streaming=True)
+        started_at = self.telemetry.clock()
         generation_finished = False
         try:
             async for event in self.llm_provider.stream(
@@ -355,13 +393,13 @@ class RAGGenerationService:
         if tail:
             answer_parts.append(tail)
             yield RAGStreamDelta(text=tail)
-        self._finish_span(
+        finish_generation_observation(
             generation_span,
-            metadata={
-                "model": model,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-            },
+            telemetry=self.telemetry,
+            started_at=started_at,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         answer = "".join(answer_parts)
         grounding_span = self._start_span(
@@ -391,6 +429,34 @@ class RAGGenerationService:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cited_labels=validated.cited_labels,
+        )
+
+    def _start_generation(
+        self,
+        observation: Observation | None,
+        prepared: PreparedRAGGeneration,
+        *,
+        streaming: bool,
+        generation_attempt: int | None = None,
+    ) -> Observation | None:
+        """Start the model-call observation; a regeneration is a separate, separately named one."""
+        metadata: dict[str, object] = {
+            "streaming": streaming,
+            "temperature": self.temperature,
+            "max_completion_tokens": self.max_completion_tokens,
+        }
+        if generation_attempt is not None:
+            metadata["generation_attempt"] = generation_attempt
+        if prepared.regeneration:
+            metadata.update(
+                {f"base_{key}": value for key, value in self.prompt_builder.identity.as_metadata().items()}
+            )
+        return start_generation_observation(
+            observation,
+            name=RAG_REGENERATION_OBSERVATION if prepared.regeneration else RAG_GENERATION_OBSERVATION,
+            prompt=prepared.prompt_identity,
+            telemetry=self.telemetry,
+            metadata=metadata,
         )
 
     @staticmethod

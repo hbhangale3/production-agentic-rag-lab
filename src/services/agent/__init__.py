@@ -6,6 +6,13 @@ from src.services.agent.answer_grounding import (
     AnswerGroundingPromptBuilder,
     AnswerGroundingResult,
 )
+from src.services.agent.cache_identity import (
+    AGENT_CACHE_NAMESPACE,
+    AGENT_PIPELINE_VERSION,
+    AgentCacheIdentity,
+    AgentCacheIdentityFactory,
+    AgentCacheKeyBuilder,
+)
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import (
@@ -21,7 +28,7 @@ from src.services.agent.final_evidence import (
     normalize_live_evidence,
     normalize_local_evidence,
 )
-from src.services.agent.graph import AgentGraphDependencies, build_agent_graph
+from src.services.agent.graph import AGENT_OBSERVATION_KEY, AgentGraphDependencies, build_agent_graph
 from src.services.agent.guardrail import (
     GuardrailEvaluationError,
     GuardrailEvaluator,
@@ -49,6 +56,13 @@ from src.services.agent.live_selection import (
     LivePaperSelector,
     LiveSelectionError,
 )
+from src.services.agent.prompts import (
+    AGENT_PROMPT_DEFINITIONS,
+    AgentPromptBundle,
+    AgentPromptIdentityBundle,
+    local_agent_prompt_bundle,
+    resolve_agent_prompt_bundle,
+)
 from src.services.agent.query_rewriter import (
     QueryRewriteError,
     QueryRewritePromptBuilder,
@@ -59,6 +73,17 @@ from src.services.agent.state import AgentState, EvidenceGrade, create_initial_a
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 
 __all__ = [
+    "AGENT_CACHE_NAMESPACE",
+    "AGENT_OBSERVATION_KEY",
+    "AGENT_PIPELINE_VERSION",
+    "AGENT_PROMPT_DEFINITIONS",
+    "AgentCacheIdentity",
+    "AgentCacheIdentityFactory",
+    "AgentCacheKeyBuilder",
+    "AgentPromptBundle",
+    "AgentPromptIdentityBundle",
+    "local_agent_prompt_bundle",
+    "resolve_agent_prompt_bundle",
     "AgentErrorCategory",
     "AgentEvidenceCandidate",
     "AgentExecutionEvent",

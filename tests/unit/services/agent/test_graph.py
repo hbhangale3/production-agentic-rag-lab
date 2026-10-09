@@ -11,6 +11,8 @@ from src.exceptions import ArxivPDFDownloadError, PDFNoTextError, PDFParserError
 from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
 from src.schemas.parsed_pdf import ParsedPDF
 from src.services.agent import (
+    AGENT_OBSERVATION_KEY,
+    AGENT_PROMPT_DEFINITIONS,
     AgentErrorCategory,
     AgentEvidenceCandidate,
     AgentExecutionStatus,
@@ -29,12 +31,16 @@ from src.services.agent import (
     TransientLiveEvidenceChunk,
     build_agent_graph,
     create_initial_agent_state,
+    local_agent_prompt_bundle,
+    resolve_agent_prompt_bundle,
 )
 from src.services.agent.query_rewriter import MAX_REWRITTEN_QUERY_CHARACTERS
 from src.services.arxiv.client import ArxivClient
 from src.services.chunking import PaperChunkingService
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm.base import LLMCompletion
+from src.services.observability import LLMTelemetry, TokenCostRates
+from src.services.prompts import ResolvedPrompt, local_prompt
 from src.services.rag import RAG_SYSTEM_PROMPT, RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
 
@@ -2032,6 +2038,329 @@ async def test_grounding_and_regeneration_events_are_deterministic_and_content_f
         "fake-model",
     ):
         assert forbidden not in serialized
+
+
+class RecordingObservation:
+    def __init__(self, name: str = "agent.request", kind: str = "span", metadata=None) -> None:
+        self.name, self.kind = name, kind
+        self.metadata = [metadata or {}]
+        self.error_types: list[str] = []
+        self.generation_records: list[dict] = []
+        self.children: list[RecordingObservation] = []
+        self.end_count = 0
+
+    def start_span(self, *, name, metadata=None):
+        child = RecordingObservation(name, "span", metadata)
+        self.children.append(child)
+        return child
+
+    def start_generation(self, *, name, model=None, metadata=None):
+        child = RecordingObservation(name, "generation", metadata)
+        self.children.append(child)
+        return child
+
+    def record_generation(self, **kwargs) -> None:
+        self.generation_records.append(kwargs)
+
+    def update(self, *, metadata=None, error_type=None) -> None:
+        if metadata:
+            self.metadata.append(metadata)
+        if error_type:
+            self.error_types.append(error_type)
+
+    def end(self) -> None:
+        self.end_count += 1
+
+    @property
+    def generations(self) -> list["RecordingObservation"]:
+        return [child for child in self.children if child.kind == "generation"]
+
+
+async def run_observed(deps, observation, question: str = "AI question", config: AgentGraphConfig | None = None):
+    graph = build_agent_graph(dependencies=deps, config=config)
+    return await graph.ainvoke(
+        create_initial_agent_state(question), config={"configurable": {AGENT_OBSERVATION_KEY: observation}}
+    )
+
+
+PROMPT_IDENTITIES = local_agent_prompt_bundle().identities
+
+
+@pytest.mark.anyio
+async def test_every_llm_call_on_the_local_path_is_a_generation_observation_with_prompt_identity() -> None:
+    deps, _, _ = dependencies()
+    deps = dataclasses.replace(deps, llm_telemetry=LLMTelemetry(provider_name="test-provider"))
+    root = RecordingObservation()
+
+    result = await run_observed(deps, root, "How is NLP used in clinical decision support?")
+
+    assert statuses(result) == SUFFICIENT_PATH
+    assert [generation.name for generation in root.generations] == [
+        "agent.guardrail",
+        "agent.evidence_grader",
+        "rag.generation",
+        "agent.answer_grounding",
+    ]
+    assert [child.name for child in root.children if child.kind == "span"] == ["rag.evidence", "rag.grounding"]
+    expected = [
+        PROMPT_IDENTITIES.guardrail,
+        PROMPT_IDENTITIES.evidence_grader,
+        PROMPT_IDENTITIES.generation,
+        PROMPT_IDENTITIES.answer_grounding,
+    ]
+    for generation, identity in zip(root.generations, expected, strict=True):
+        started = generation.metadata[0]
+        assert {key: started[key] for key in identity.as_metadata()} == identity.as_metadata()
+        assert generation.generation_records == [
+            {"model": "fake-model", "input_tokens": 111, "output_tokens": 22, "cost": None}
+        ]
+        finished = generation.metadata[1]
+        assert (finished["model"], finished["prompt_tokens"], finished["completion_tokens"]) == ("fake-model", 111, 22)
+        assert finished["latency_ms"] >= 0
+        assert "cost_usd" not in finished
+        assert generation.end_count == 1 and generation.error_types == []
+    # Classifier calls use the graph's telemetry; generation uses its own service's.
+    assert [generation.metadata[0].get("provider") for generation in root.generations] == [
+        "test-provider",
+        "test-provider",
+        None,
+        "test-provider",
+    ]
+    assert root.generations[1].metadata[0]["retrieval_attempt"] == 1
+    assert root.generations[2].metadata[0]["generation_attempt"] == 1
+    assert root.generations[3].metadata[0]["grounding_attempt"] == 1
+
+
+@pytest.mark.anyio
+async def test_regeneration_is_a_separate_generation_observation_with_its_own_identity() -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, HIGH))
+    deps, _, _ = dependencies(llm=llm)
+    root = RecordingObservation()
+
+    result = await run_observed(deps, root)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *REGENERATE_PASS_TAIL]
+    names = [generation.name for generation in root.generations]
+    assert names == [
+        "agent.guardrail",
+        "agent.evidence_grader",
+        "rag.generation",
+        "agent.answer_grounding",
+        "rag.regeneration",
+        "agent.answer_grounding",
+    ]
+    first, regenerated = root.generations[2], root.generations[4]
+    assert first.metadata[0]["generation_attempt"] == 1
+    assert first.metadata[0]["prompt_name"] == "rag-answer-generation"
+    assert regenerated.metadata[0]["generation_attempt"] == 2
+    assert regenerated.metadata[0]["prompt_name"] == "rag-answer-regeneration"
+    assert regenerated.metadata[0]["prompt_fingerprint"] == PROMPT_IDENTITIES.regeneration.fingerprint
+    assert regenerated.metadata[0]["base_prompt_name"] == "rag-answer-generation"
+    assert regenerated.metadata[0]["base_prompt_fingerprint"] == PROMPT_IDENTITIES.generation.fingerprint
+    assert "base_prompt_name" not in first.metadata[0]
+    assert first is not regenerated and first.end_count == regenerated.end_count == 1
+    assert [root.generations[index].metadata[0]["grounding_attempt"] for index in (3, 5)] == [1, 2]
+
+
+@pytest.mark.anyio
+async def test_live_path_observes_rewrite_and_selection_and_records_known_cost() -> None:
+    deps, _, _, _ = exhausted_dependencies()
+    rates = TokenCostRates(input_per_million=1.0, output_per_million=2.0)
+    deps = dataclasses.replace(deps, llm_telemetry=LLMTelemetry(provider_name="test-provider", cost_rates=rates))
+    root = RecordingObservation()
+
+    result = await run_observed(deps, root, INDIA_QUESTION)
+
+    assert statuses(result) == LIVE_EVIDENCE_PATH
+    assert [generation.name for generation in root.generations] == [
+        "agent.guardrail",
+        "agent.evidence_grader",
+        "agent.query_rewrite",
+        "agent.evidence_grader",
+        "agent.live_selector",
+        "rag.generation",
+        "agent.answer_grounding",
+    ]
+    assert [root.generations[index].metadata[0]["retrieval_attempt"] for index in (1, 3)] == [1, 2]
+    assert root.generations[2].metadata[0]["prompt_name"] == "agent-query-rewrite"
+    assert root.generations[4].metadata[0]["prompt_name"] == "agent-live-paper-selector"
+    rewrite_cost = root.generations[2].generation_records[0]["cost"]
+    assert rewrite_cost.total_cost == pytest.approx(111 * 1.0 / 1e6 + 22 * 2.0 / 1e6)
+    assert root.generations[2].metadata[1]["cost_usd"] == pytest.approx(rewrite_cost.total_cost)
+    assert root.generations[5].generation_records[0]["cost"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("grounding", [HIGH, (LOW, HIGH), RuntimeError("secret telemetry detail")])
+async def test_generation_observations_never_contain_question_evidence_prompt_or_answer(grounding) -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=grounding)
+    deps, _, _ = dependencies(llm=llm)
+    root = RecordingObservation()
+    question = "PRIVATE_QUESTION_SENTINEL about clinical NLP?"
+
+    await run_observed(deps, root, question)
+
+    recorded = repr([(child.name, child.metadata, child.generation_records, child.error_types) for child in root.children])
+    for forbidden in (
+        question,
+        "PRIVATE_QUESTION_SENTINEL",
+        EVIDENCE_TEXT,
+        "Private Paper Title",
+        ANSWER,
+        REGENERATED_ANSWER,
+        "UNTRUSTED_",
+        "You are",
+        "BEGIN USER QUESTION",
+        "secret telemetry detail",
+        '{"score"',
+    ):
+        assert forbidden not in recorded
+    if isinstance(grounding, Exception):
+        assert root.generations[-1].name == "agent.answer_grounding"
+        assert root.generations[-1].error_types == ["RuntimeError"]
+        assert root.generations[-1].generation_records == []
+
+
+@pytest.mark.anyio
+async def test_observability_failures_and_absence_do_not_change_agent_results() -> None:
+    def comparable(result) -> dict:
+        return {key: value for key, value in result.items() if key != "generation_result"}
+
+    baseline_deps, _, _ = dependencies(llm=FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, HIGH)))
+    baseline = await run(baseline_deps)
+
+    broken = Mock()
+    broken.start_generation.side_effect = RuntimeError("telemetry down")
+    broken.start_span.side_effect = RuntimeError("telemetry down")
+    half_broken = Mock()
+    for child in (half_broken.start_generation.return_value, half_broken.start_span.return_value):
+        child.record_generation.side_effect = RuntimeError("telemetry down")
+        child.update.side_effect = RuntimeError("telemetry down")
+        child.end.side_effect = RuntimeError("telemetry down")
+
+    for observation in (broken, half_broken, RecordingObservation(), None):
+        deps, _, _ = dependencies(llm=FakeLLMProvider(answer=(ANSWER, REGENERATED_ANSWER), grounding=(LOW, HIGH)))
+        result = await run_observed(deps, observation)
+        assert comparable(result) == comparable(baseline)
+        assert result["generation_result"].answer == REGENERATED_ANSWER
+
+
+@pytest.mark.anyio
+async def test_state_records_local_prompt_identities_by_default_without_template_text() -> None:
+    deps, _, _ = dependencies()
+
+    result = await run(deps)
+    rejected = await run(dependencies(llm=FakeLLMProvider('{"score":10}'))[0])
+
+    assert result["prompt_identities"] == PROMPT_IDENTITIES
+    assert rejected["prompt_identities"] == PROMPT_IDENTITIES
+    assert create_initial_agent_state("AI question")["prompt_identities"] is None
+    assert "You are" not in repr(result["prompt_identities"])
+
+
+class MarkerLLM:
+    """Answers by what each call's user payload is, so managed system prompts can differ freely."""
+
+    def __init__(self) -> None:
+        self.system_prompts: dict[str, list[str]] = {}
+
+    async def complete(self, messages, **kwargs):
+        system, user = messages[0].content, messages[1].content
+        for marker, stage, content in (
+            ("UNTRUSTED_QUESTION_JSON", "guardrail", '{"score":90}'),
+            ("UNTRUSTED_GRADING_INPUT_JSON", "evidence_grader", '{"score":25}'),
+            ("UNTRUSTED_REWRITE_INPUT_JSON", "query_rewrite", REWRITE_JSON),
+            ("UNTRUSTED_SELECTION_INPUT_JSON", "live_selector", SELECT_FIRST),
+            ("UNTRUSTED_GROUNDING_INPUT_JSON", "answer_grounding", '{"score":30}'),
+            ("BEGIN PREVIOUS ANSWER", "regeneration", REGENERATED_ANSWER),
+            ("BEGIN USER QUESTION", "generation", ANSWER),
+        ):
+            if marker in user:
+                self.system_prompts.setdefault(stage, []).append(system)
+                self.last_user = {**getattr(self, "last_user", {}), stage: user}
+                return LLMCompletion(content=content, model="fake-model", prompt_tokens=1, completion_tokens=1)
+        raise AssertionError("unexpected LLM call")
+
+
+class ManagedResolver:
+    async def resolve(self, definition, *, label="production"):
+        return ResolvedPrompt(
+            name=definition.name,
+            content=f"MANAGED[{definition.name}] " + " ".join(definition.required_markers),
+            version="langfuse-v5",
+            label=label,
+            source="langfuse",
+        )
+
+
+@pytest.mark.anyio
+async def test_graph_executes_with_exactly_the_resolved_prompt_bundle_it_was_built_with() -> None:
+    bundle = await resolve_agent_prompt_bundle(ManagedResolver())
+    llm = MarkerLLM()
+    first = retrieval_result(hits=[make_hit("a1", "attempt one evidence")])
+    second = retrieval_result(hits=[make_hit("b1", "attempt two evidence")])
+    deps, _, _ = dependencies(llm=FakeLLMProvider(), results=[first, second])
+    deps = dataclasses.replace(
+        deps,
+        llm_provider=llm,
+        rag_generation_service=RAGGenerationService(
+            llm_provider=llm,
+            evidence_builder=deps.evidence_context_builder,
+            max_completion_tokens=64,
+            token_safety_margin=16,
+        ),
+    )
+    root = RecordingObservation()
+
+    graph = build_agent_graph(dependencies=deps, prompts=bundle)
+    result = await graph.ainvoke(
+        create_initial_agent_state(INDIA_QUESTION), config={"configurable": {AGENT_OBSERVATION_KEY: root}}
+    )
+
+    assert statuses(result) == [*LIVE_PROCESSED, *REGENERATE_FAIL_TAIL]
+    assert result["terminal_reason"] == TerminalReason.GROUNDING_FAILED
+    for stage in ("guardrail", "evidence_grader", "query_rewrite", "live_selector", "generation", "answer_grounding"):
+        name = AGENT_PROMPT_DEFINITIONS[stage].name
+        assert set(llm.system_prompts[stage]) == {getattr(bundle, stage).content}
+        assert f"MANAGED[{name}]" in llm.system_prompts[stage][0]
+    assert set(llm.system_prompts["regeneration"]) == {bundle.generation.content}
+    assert llm.last_user["regeneration"].endswith(bundle.regeneration.content)
+    assert result["prompt_identities"] == bundle.identities
+    assert {identity["version"] for identity in bundle.identities.as_cache_payload().values()} == {"langfuse-v5"}
+    assert result["prompt_identities"] != PROMPT_IDENTITIES
+    observed = {generation.name: generation.metadata[0] for generation in root.generations}
+    assert observed["agent.guardrail"]["prompt_version"] == "langfuse-v5"
+    assert observed["agent.guardrail"]["prompt_fingerprint"] == bundle.identities.guardrail.fingerprint
+    assert observed["rag.generation"]["prompt_fingerprint"] == bundle.identities.generation.fingerprint
+    assert observed["rag.regeneration"]["prompt_fingerprint"] == bundle.identities.regeneration.fingerprint
+    assert "MANAGED[" not in repr([(g.metadata, g.generation_records) for g in root.generations])
+    assert deps.rag_generation_service.prompt_builder.identity == PROMPT_IDENTITIES.generation
+
+
+@pytest.mark.anyio
+async def test_partially_managed_bundle_keeps_local_prompts_for_the_rest() -> None:
+    local = local_agent_prompt_bundle()
+    managed_guardrail = ResolvedPrompt(
+        name="agent-guardrail",
+        content='Managed guardrail. Return {"score": <0-100>}.',
+        version="langfuse-v2",
+        label="production",
+        source="langfuse",
+    )
+    bundle = dataclasses.replace(local, guardrail=managed_guardrail)
+    llm = MarkerLLM()
+    deps, _, _ = dependencies()
+    deps = dataclasses.replace(deps, llm_provider=llm)
+
+    result = await build_agent_graph(dependencies=deps, config=SINGLE_ATTEMPT, prompts=bundle).ainvoke(
+        create_initial_agent_state("AI question")
+    )
+
+    assert llm.system_prompts["guardrail"] == [managed_guardrail.content]
+    assert llm.system_prompts["evidence_grader"] == [local.evidence_grader.content]
+    assert result["prompt_identities"].guardrail.version == "langfuse-v2"
+    assert result["prompt_identities"].evidence_grader == PROMPT_IDENTITIES.evidence_grader
+    assert local_prompt(AGENT_PROMPT_DEFINITIONS["guardrail"]) == local.guardrail
 
 
 def scenario_dependencies():
