@@ -52,6 +52,10 @@ class Settings(DefaultSettings):
     llm_timeout_seconds: float = Field(default=30.0, gt=0)
     llm_max_retries: int = Field(default=2, ge=0)
     evidence_context_max_tokens: int = Field(default=6000, gt=0)
+    llm_temperature: float = Field(default=0.1, ge=0, le=2)
+    llm_max_completion_tokens: int = Field(default=512, gt=0)
+    llm_context_window_tokens: int = Field(default=8192, gt=0)
+    llm_token_safety_margin: int = Field(default=256, ge=0)
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
@@ -88,6 +92,10 @@ class Settings(DefaultSettings):
             raise ValueError("chunk overlap must be smaller than the target chunk size")
         if self.chunk_min_words > self.chunk_target_words:
             raise ValueError("minimum chunk size must not exceed the target chunk size")
+        if self.llm_max_completion_tokens + self.llm_token_safety_margin >= self.llm_context_window_tokens:
+            raise ValueError(
+                "LLM completion allowance and safety margin must leave prompt capacity"
+            )
         return self
 
 

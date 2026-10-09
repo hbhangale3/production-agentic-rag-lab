@@ -65,6 +65,10 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
     assert settings.llm_timeout_seconds == 30.0
     assert settings.llm_max_retries == 2
     assert settings.evidence_context_max_tokens == 6000
+    assert settings.llm_temperature == 0.1
+    assert settings.llm_max_completion_tokens == 512
+    assert settings.llm_context_window_tokens == 8192
+    assert settings.llm_token_safety_margin == 256
 
 
 @pytest.mark.parametrize(
@@ -75,6 +79,11 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
         ("llm_timeout_seconds", -1),
         ("llm_max_retries", -1),
         ("evidence_context_max_tokens", 0),
+        ("llm_temperature", -0.1),
+        ("llm_temperature", 2.1),
+        ("llm_max_completion_tokens", 0),
+        ("llm_context_window_tokens", 0),
+        ("llm_token_safety_margin", -1),
     ],
 )
 def test_invalid_week5_llm_settings_are_rejected(field: str, value: Any) -> None:
@@ -87,3 +96,12 @@ def test_groq_api_key_is_redacted_from_settings_representation() -> None:
 
     assert "super-secret-test-key" not in repr(settings)
     assert "**********" in repr(settings)
+
+
+def test_generation_reserves_prompt_capacity() -> None:
+    with pytest.raises(ValidationError, match="leave prompt capacity"):
+        make_settings(
+            llm_context_window_tokens=768,
+            llm_max_completion_tokens=512,
+            llm_token_safety_margin=256,
+        )

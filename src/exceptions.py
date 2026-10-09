@@ -58,6 +58,18 @@ class LLMResponseError(LLMException):
     """Exception raised when an LLM provider returns an unusable response."""
 
 
+class RAGException(Exception):
+    """Base exception for grounded generation failures outside the provider."""
+
+
+class InsufficientEvidenceError(RAGException):
+    """Exception raised when retrieval yields no evidence suitable for generation."""
+
+
+class RAGPromptBudgetError(RAGException):
+    """Exception raised when reserved generation capacity cannot be respected."""
+
+
 # General application exceptions
 class ConfigurationError(Exception):
     """Exception raised when configuration is invalid."""
