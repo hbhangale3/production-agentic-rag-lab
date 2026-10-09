@@ -108,3 +108,41 @@ def test_generation_reserves_prompt_capacity() -> None:
             llm_max_completion_tokens=512,
             llm_token_safety_margin=256,
         )
+
+
+def test_week6_redis_defaults_are_optional_and_secret_safe() -> None:
+    settings = make_settings()
+
+    assert settings.redis_enabled is False
+    assert settings.redis_url.get_secret_value() == "redis://127.0.0.1:6379/0"
+    assert settings.rag_cache_ttl_seconds == 86_400
+    assert "redis://127.0.0.1:6379/0" not in repr(settings)
+
+
+def test_enabled_redis_configuration_is_valid_without_connecting() -> None:
+    settings = make_settings(
+        redis_enabled=True,
+        redis_url="redis://cache.test:6379/2",
+        rag_cache_ttl_seconds=60,
+    )
+
+    assert settings.redis_enabled is True
+    assert settings.redis_url.get_secret_value() == "redis://cache.test:6379/2"
+    assert settings.rag_cache_ttl_seconds == 60
+
+
+@pytest.mark.parametrize("ttl", [0, -1])
+def test_cache_ttl_must_be_positive(ttl: int) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(rag_cache_ttl_seconds=ttl)
+
+
+def test_enabled_redis_requires_nonblank_url() -> None:
+    with pytest.raises(ValidationError, match="Redis URL must not be blank"):
+        make_settings(redis_enabled=True, redis_url="   ")
+
+
+def test_disabled_redis_allows_blank_url_and_requires_no_server() -> None:
+    settings = make_settings(redis_enabled=False, redis_url="")
+
+    assert settings.redis_enabled is False

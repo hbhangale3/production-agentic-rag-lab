@@ -9,6 +9,7 @@ from src.exceptions import LLMConfigurationError
 
 # Week 1: No complex middleware needed
 from src.routers import ask, hybrid_search, papers, ping, search
+from src.services.cache import make_cache
 from src.services.embeddings.factory import make_embedding_provider
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm.factory import make_llm_provider
@@ -34,6 +35,8 @@ async def lifespan(app: FastAPI):
     # Initialize settings and database (Week 1 essentials)
     settings = get_settings()
     app.state.settings = settings
+    cache = make_cache(settings)
+    app.state.cache = cache
 
     database = make_database()
     app.state.database = database
@@ -85,6 +88,7 @@ async def lifespan(app: FastAPI):
     chunk_index.close()
     if llm_provider is not None:
         await llm_provider.close()
+    await cache.close()
     logger.info("API shutdown complete")
 
 

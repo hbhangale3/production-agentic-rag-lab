@@ -58,6 +58,11 @@ class Settings(DefaultSettings):
     llm_token_safety_margin: int = Field(default=256, ge=0)
     rag_retrieval_size: int = Field(default=5, gt=0, le=100)
 
+    # Week 6 optional exact-response cache infrastructure
+    redis_enabled: bool = False
+    redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
+    rag_cache_ttl_seconds: int = Field(default=86_400, gt=0)
+
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"
     arxiv_search_category: str = "cs.AI"
@@ -87,6 +92,12 @@ class Settings(DefaultSettings):
         return normalized
 
     @model_validator(mode="after")
+    def validate_redis_configuration(self) -> "Settings":
+        if self.redis_enabled and not self.redis_url.get_secret_value().strip():
+            raise ValueError("Redis URL must not be blank when Redis caching is enabled")
+        return self
+
+    @model_validator(mode="after")
     def validate_chunk_sizes(self) -> "Settings":
         """Validate relationships between the future chunking settings."""
         if self.chunk_overlap_words >= self.chunk_target_words:
@@ -94,9 +105,7 @@ class Settings(DefaultSettings):
         if self.chunk_min_words > self.chunk_target_words:
             raise ValueError("minimum chunk size must not exceed the target chunk size")
         if self.llm_max_completion_tokens + self.llm_token_safety_margin >= self.llm_context_window_tokens:
-            raise ValueError(
-                "LLM completion allowance and safety margin must leave prompt capacity"
-            )
+            raise ValueError("LLM completion allowance and safety margin must leave prompt capacity")
         return self
 
 
