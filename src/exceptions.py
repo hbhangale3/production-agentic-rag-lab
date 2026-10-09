@@ -58,6 +58,10 @@ class LLMResponseError(LLMException):
     """Exception raised when an LLM provider returns an unusable response."""
 
 
+class GroundingValidationError(LLMResponseError):
+    """Exception raised when a generated answer violates the grounding contract."""
+
+
 class RAGException(Exception):
     """Base exception for grounded generation failures outside the provider."""
 

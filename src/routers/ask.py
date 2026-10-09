@@ -5,6 +5,7 @@ from functools import partial
 from fastapi import APIRouter, HTTPException, status
 from src.dependencies import HybridSearchServiceDep, RAGGenerationServiceDep, RequestSettingsDep
 from src.exceptions import (
+    GroundingValidationError,
     HybridSearchError,
     InsufficientEvidenceError,
     LLMConfigurationError,
@@ -151,6 +152,14 @@ async def stream_ask_question(
                             "citations": list(event.cited_labels),
                         },
                     )
+        except GroundingValidationError:
+            yield _sse(
+                "error",
+                {
+                    "code": "grounding_validation_failed",
+                    "message": "The generated answer could not be validated against the supplied evidence.",
+                },
+            )
         except (LLMConfigurationError, LLMRequestError, LLMResponseError):
             yield _sse(
                 "error",

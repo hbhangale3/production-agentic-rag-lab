@@ -2,14 +2,12 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from src.exceptions import InsufficientEvidenceError, LLMResponseError, RAGPromptBudgetError
+from src.exceptions import InsufficientEvidenceError, RAGPromptBudgetError
 from src.schemas.hybrid_search import HybridSearchResult
 from src.services.evidence import EvidenceContextBuilder, EvidenceSource, TokenCounter
 from src.services.llm.base import ChatMessage, LLMProvider
 from src.services.rag.prompt import RAGPromptBuilder
-
-CITATION_LABEL = re.compile(r"\[S\d+\]")
-FULLWIDTH_CITATION_LABEL = re.compile(r"【S(\d+)】")
+from src.services.rag.validation import FULLWIDTH_CITATION, GroundedAnswerValidator
 
 
 @dataclass(frozen=True)
@@ -62,6 +60,7 @@ class RAGGenerationService:
         context_window_tokens: int = 8192,
         token_safety_margin: int = 256,
         token_counter: TokenCounter | None = None,
+        answer_validator: GroundedAnswerValidator | None = None,
     ) -> None:
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not 0 <= temperature <= 2:
             raise ValueError("temperature must be between 0 and 2")
@@ -80,6 +79,7 @@ class RAGGenerationService:
         self.context_window_tokens = context_window_tokens
         self.token_safety_margin = token_safety_margin
         self.token_counter = token_counter or evidence_builder.token_counter
+        self.answer_validator = answer_validator or GroundedAnswerValidator()
 
     @classmethod
     def from_settings(
@@ -113,20 +113,16 @@ class RAGGenerationService:
             temperature=self.temperature,
             max_tokens=self.max_completion_tokens,
         )
-        answer = FULLWIDTH_CITATION_LABEL.sub(r"[S\1]", completion.content)
-        cited_labels = tuple(dict.fromkeys(CITATION_LABEL.findall(answer)))
-        available_labels = {source.label for source in prepared.sources}
-        if any(label not in available_labels for label in cited_labels):
-            raise LLMResponseError("LLM answer contained an unsupported citation label")
+        validated = self.answer_validator.validate(completion.content, prepared.sources)
 
         return RAGGenerationResult(
-            answer=answer,
+            answer=validated.answer,
             sources=prepared.sources,
             retrieval_mode=prepared.retrieval_mode,
             model=completion.model,
             prompt_tokens=completion.prompt_tokens,
             completion_tokens=completion.completion_tokens,
-            cited_labels=cited_labels,
+            cited_labels=validated.cited_labels,
             estimated_prompt_tokens=prepared.estimated_prompt_tokens,
             token_counting=self.token_counter.description,
         )
@@ -156,7 +152,6 @@ class RAGGenerationService:
         model: str | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
-        saw_text = False
         async for event in self.llm_provider.stream(
             prepared.messages,
             temperature=self.temperature,
@@ -167,7 +162,6 @@ class RAGGenerationService:
             completion_tokens = event.completion_tokens if event.completion_tokens is not None else completion_tokens
             if event.text is None:
                 continue
-            saw_text = True
             text = normalizer.feed(event.text)
             if text:
                 answer_parts.append(text)
@@ -177,17 +171,12 @@ class RAGGenerationService:
             answer_parts.append(tail)
             yield RAGStreamDelta(text=tail)
         answer = "".join(answer_parts)
-        if not saw_text or not answer.strip():
-            raise LLMResponseError("LLM returned empty streaming content")
-        cited_labels = tuple(dict.fromkeys(CITATION_LABEL.findall(answer)))
-        available_labels = {source.label for source in prepared.sources}
-        if any(label not in available_labels for label in cited_labels):
-            raise LLMResponseError("LLM answer contained an unsupported citation label")
+        validated = self.answer_validator.validate(answer, prepared.sources)
         yield RAGStreamComplete(
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cited_labels=cited_labels,
+            cited_labels=validated.cited_labels,
         )
 
     @staticmethod
@@ -203,7 +192,7 @@ class _FullwidthCitationStreamNormalizer:
         self._pending = ""
 
     def feed(self, text: str) -> str:
-        combined = FULLWIDTH_CITATION_LABEL.sub(r"[S\1]", self._pending + text)
+        combined = FULLWIDTH_CITATION.sub(r"[S\1]", self._pending + text)
         self._pending = ""
         marker = combined.rfind("【")
         if marker >= 0 and re.fullmatch(r"【(?:S\d*)?", combined[marker:]):
