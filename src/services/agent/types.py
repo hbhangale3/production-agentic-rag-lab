@@ -14,6 +14,7 @@ class TerminalReason(StrEnum):
 
 
 class AgentErrorCategory(StrEnum):
+    GUARDRAIL_FAILURE = "guardrail_failure"
     RETRIEVAL_FAILURE = "retrieval_failure"
     EVIDENCE_FAILURE = "evidence_failure"
     GENERATION_FAILURE = "generation_failure"
