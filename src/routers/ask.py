@@ -3,7 +3,12 @@ from collections.abc import AsyncIterator
 from functools import partial
 
 from fastapi import APIRouter, HTTPException, status
-from src.dependencies import HybridSearchServiceDep, RAGGenerationServiceDep, RequestSettingsDep
+from src.dependencies import (
+    HybridSearchServiceDep,
+    RAGGenerationServiceDep,
+    RAGResponseCacheDep,
+    RequestSettingsDep,
+)
 from src.exceptions import (
     GroundingValidationError,
     HybridSearchError,
@@ -31,9 +36,14 @@ async def ask_question(
     request: AskRequest,
     hybrid_service: HybridSearchServiceDep,
     rag_service: RAGGenerationServiceDep,
+    response_cache: RAGResponseCacheDep,
     settings: RequestSettingsDep,
 ) -> AskResponse:
     """Retrieve ranked evidence and generate one grounded research answer."""
+    cache_lookup = await response_cache.lookup(question=request.question)
+    if cache_lookup.response is not None:
+        return cache_lookup.response
+
     search = partial(
         hybrid_service.search,
         request.question,
@@ -53,7 +63,7 @@ async def ask_question(
             retrieval_result=retrieval_result,
         )
     except InsufficientEvidenceError:
-        return AskResponse(
+        response = AskResponse(
             answer=INSUFFICIENT_EVIDENCE_ANSWER,
             sources=[],
             retrieval_mode=retrieval_result.retrieval_mode,
@@ -61,6 +71,8 @@ async def ask_question(
             prompt_tokens=None,
             completion_tokens=None,
         )
+        await response_cache.store(cache_lookup, response)
+        return response
     except RAGPromptBudgetError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -81,7 +93,9 @@ async def ask_question(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Language model service returned an unusable response.",
         ) from exc
-    return build_ask_response(generation)
+    response = build_ask_response(generation)
+    await response_cache.store(cache_lookup, response)
+    return response
 
 
 @router.post("/ask/stream")

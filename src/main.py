@@ -9,7 +9,7 @@ from src.exceptions import LLMConfigurationError
 
 # Week 1: No complex middleware needed
 from src.routers import ask, hybrid_search, papers, ping, search
-from src.services.cache import make_cache
+from src.services.cache import RAGResponseCacheCoordinator, make_cache
 from src.services.embeddings.factory import make_embedding_provider
 from src.services.evidence import EvidenceContextBuilder
 from src.services.llm.factory import make_llm_provider
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     cache = make_cache(settings)
     app.state.cache = cache
+    app.state.rag_response_cache = RAGResponseCacheCoordinator(cache=cache, settings=settings)
 
     database = make_database()
     app.state.database = database

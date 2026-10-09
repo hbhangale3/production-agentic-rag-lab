@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.interfaces.base import BaseDatabase
+from src.services.cache import RAGResponseCacheCoordinator
 from src.services.opensearch.factory import make_opensearch_client
 from src.services.rag import RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
@@ -73,6 +74,11 @@ def get_rag_generation_service(request: Request) -> RAGGenerationService:
     return service
 
 
+def get_rag_response_cache(request: Request) -> RAGResponseCacheCoordinator:
+    """Return the worker-scoped exact-response cache coordinator."""
+    return request.app.state.rag_response_cache
+
+
 # Dependency type aliases for better type hints
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RequestSettingsDep = Annotated[Settings, Depends(get_request_settings)]
@@ -83,3 +89,4 @@ OpenSearchServiceDep = Annotated[object, Depends(get_opensearch_service)]
 PaperSearchServiceDep = Annotated[PaperSearchService, Depends(get_paper_search_service)]
 HybridSearchServiceDep = Annotated[HybridSearchService, Depends(get_hybrid_search_service)]
 RAGGenerationServiceDep = Annotated[RAGGenerationService, Depends(get_rag_generation_service)]
+RAGResponseCacheDep = Annotated[RAGResponseCacheCoordinator, Depends(get_rag_response_cache)]
