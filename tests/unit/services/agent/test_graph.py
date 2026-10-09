@@ -1,3 +1,5 @@
+import dataclasses
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -9,6 +11,9 @@ from src.services.agent import (
     AgentGraphConfig,
     AgentGraphDependencies,
     EvidenceGrade,
+    LiveArxivPaper,
+    LiveArxivSearchResult,
+    LiveSearchError,
     TerminalReason,
     build_agent_graph,
     create_initial_agent_state,
@@ -22,7 +27,8 @@ EVIDENCE_TEXT = "private evidence text about clinical NLP"
 INDIA_QUESTION = "What are the current healthcare issues in India and how can AI help solve them?"
 REWRITTEN = "India healthcare challenges artificial intelligence health equity"
 REWRITE_JSON = f'{{"query":"{REWRITTEN}"}}'
-SINGLE_ATTEMPT = AgentGraphConfig(max_local_retrieval_attempts=1)
+SINGLE_ATTEMPT = AgentGraphConfig(max_local_retrieval_attempts=1, live_fallback_enabled=False)
+LOCAL_ONLY = AgentGraphConfig(live_fallback_enabled=False)
 
 GUARDRAIL_PASSED = [S.GRAPH_STARTED, S.GUARDRAIL_STARTED, S.GUARDRAIL_PASSED]
 RETRIEVED = [*GUARDRAIL_PASSED, S.LOCAL_RETRIEVAL_STARTED, S.LOCAL_RETRIEVAL_COMPLETED]
@@ -40,6 +46,9 @@ RETRY_INSUFFICIENT_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVID
 REWRITE_FAILED_PATH = [*FIRST_INSUFFICIENT, S.QUERY_REWRITE_STARTED, S.GRAPH_FAILED]
 SECOND_RETRIEVAL_FAILED_PATH = [*REWRITTEN_PATH, S.LOCAL_RETRIEVAL_STARTED, S.GRAPH_FAILED]
 SECOND_GRADER_FAILED_PATH = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.GRAPH_FAILED]
+LOCAL_EXHAUSTED = [*SECOND_RETRIEVED, S.EVIDENCE_GRADING_STARTED, S.EVIDENCE_INSUFFICIENT]
+LIVE_COMPLETED_PATH = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.LIVE_FALLBACK_COMPLETED, S.GRAPH_COMPLETED]
+LIVE_FAILED_PATH = [*LOCAL_EXHAUSTED, S.LIVE_FALLBACK_STARTED, S.GRAPH_FAILED]
 
 
 class FakeLLMProvider:
@@ -74,8 +83,31 @@ def retrieval_result(mode: str = "hybrid", hits: list[HybridSearchHit] | None = 
     return HybridSearchResult(query="question", retrieval_mode=mode, count=len(results), results=results)
 
 
-def dependencies(*, llm=None, result=None, results=None, retrieval_error=None, max_context_tokens=1000):
+def make_live_paper(arxiv_id: str = "2501.00001") -> LiveArxivPaper:
+    return LiveArxivPaper(
+        arxiv_id=arxiv_id,
+        title=f"Private Live Title {arxiv_id}",
+        abstract="private live abstract",
+        authors=("Private Author",),
+        categories=("cs.CY",),
+        published_date=datetime(2025, 1, 2, tzinfo=UTC),
+        updated_date=None,
+        pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
+    )
+
+
+def live_result(*arxiv_ids: str) -> LiveArxivSearchResult:
+    return LiveArxivSearchResult(query="live query", candidates=tuple(make_live_paper(i) for i in arxiv_ids))
+
+
+def dependencies(
+    *, llm=None, result=None, results=None, retrieval_error=None, max_context_tokens=1000, live=None, live_error=None
+):
     """``results`` scripts successive search calls; an exception item is raised."""
+    live_service = Mock()
+    live_service.search = AsyncMock(
+        return_value=live_result("2501.00001") if live is None else live, side_effect=live_error
+    )
     provider = llm or FakeLLMProvider()
     retrieval = Mock(spec=HybridSearchService)
     retrieval.search.return_value = result or retrieval_result()
@@ -84,6 +116,7 @@ def dependencies(*, llm=None, result=None, results=None, retrieval_error=None, m
         llm_provider=provider,
         hybrid_search_service=retrieval,
         evidence_context_builder=EvidenceContextBuilder(max_context_tokens=max_context_tokens),
+        live_search_service=live_service,
     )
     return deps, provider, retrieval
 
@@ -102,6 +135,7 @@ def assert_no_downstream_progress(result) -> None:
     assert result["grounding_passed"] is None
     assert result["grounding_attempts"] == 0
     assert result["live_fallback_used"] is False
+    assert result["live_search_result"] is None
     assert result["live_evidence"] is None
     assert result["final_evidence"] is None
 
@@ -144,8 +178,9 @@ async def test_single_attempt_config_completes_insufficient_without_rewrite_or_r
     assert result["evidence_sufficient"] is False
     assert result["evidence_grade"] == EvidenceGrade(score=25, sufficient=False, source_count=1)
     assert result["current_query"] == INDIA_QUESTION
-    assert result["terminal_reason"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
     assert result["error_category"] is None
+    deps.live_search_service.search.assert_not_awaited()
     assert_no_downstream_progress(result)
 
 
@@ -178,7 +213,11 @@ async def test_routing_uses_configured_evidence_threshold(threshold: int, score:
 
     result = await run(
         deps,
-        config=AgentGraphConfig(evidence_sufficiency_threshold=threshold, max_local_retrieval_attempts=1),
+        config=AgentGraphConfig(
+            evidence_sufficiency_threshold=threshold,
+            max_local_retrieval_attempts=1,
+            live_fallback_enabled=False,
+        ),
     )
 
     assert result["evidence_sufficient"] is sufficient
@@ -231,7 +270,7 @@ async def test_empty_retrieval_is_insufficient_without_grader_llm_call() -> None
     assert result["evidence_grade"] == EvidenceGrade(score=0, sufficient=False, source_count=0)
     assert result["execution_events"][6].metadata.evidence_score == 0
     assert result["execution_events"][6].metadata.source_count == 0
-    assert result["terminal_reason"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
     assert result["error_category"] is None
 
 
@@ -263,11 +302,7 @@ async def test_context_builder_failure_is_controlled_evidence_grading_failure() 
     deps, provider, retrieval = dependencies(result=expected)
     builder = Mock(spec=EvidenceContextBuilder)
     builder.build.side_effect = RuntimeError("private context builder detail")
-    deps = AgentGraphDependencies(
-        llm_provider=provider,
-        hybrid_search_service=retrieval,
-        evidence_context_builder=builder,
-    )
+    deps = dataclasses.replace(deps, evidence_context_builder=builder)
 
     result = await run(deps)
 
@@ -384,7 +419,7 @@ async def test_routing_uses_configured_guardrail_threshold(threshold: int, passe
     assert result["terminal_reason"] == (None if passed else TerminalReason.OUT_OF_SCOPE)
 
 
-def test_graph_compilation_has_conditional_m04_topology() -> None:
+def test_graph_compilation_has_conditional_m05_topology() -> None:
     deps, _, _ = dependencies()
 
     graph = build_agent_graph(dependencies=deps).get_graph()
@@ -397,6 +432,8 @@ def test_graph_compilation_has_conditional_m04_topology() -> None:
         "local_retrieval",
         "evidence_grading",
         "query_rewrite",
+        "live_arxiv_search",
+        "insufficient_evidence",
         "graph_complete",
         "__end__",
     }
@@ -414,8 +451,23 @@ def test_graph_compilation_has_conditional_m04_topology() -> None:
         ("evidence_grading", "__end__", True),
         ("query_rewrite", "local_retrieval", True),
         ("query_rewrite", "__end__", True),
+        ("evidence_grading", "live_arxiv_search", True),
+        ("evidence_grading", "insufficient_evidence", True),
+        ("live_arxiv_search", "graph_complete", True),
+        ("live_arxiv_search", "insufficient_evidence", True),
+        ("live_arxiv_search", "__end__", True),
+        ("insufficient_evidence", "__end__", False),
         ("graph_complete", "__end__", False),
     }
+
+
+def assert_no_downstream_progress_after_rewrite(result) -> None:
+    assert result["generated_answer"] is None
+    assert result["grounding_passed"] is None
+    assert result["live_fallback_used"] is False
+    assert result["live_search_result"] is None
+    assert result["live_evidence"] is None
+    assert result["final_evidence"] is None
 
 
 def retry_dependencies(*grader_and_rewrite: str | Exception, results=None):
@@ -426,6 +478,16 @@ def retry_dependencies(*grader_and_rewrite: str | Exception, results=None):
     llm = FakeLLMProvider('{"score":90}', '{"score":25}', *grader_and_rewrite)
     deps, provider, retrieval = dependencies(llm=llm, results=[first, second] if results is None else results)
     return deps, provider, retrieval, first, second
+
+
+def exhausted_dependencies(*, live=None, live_error=None):
+    """Both local attempts grade insufficient, so the default config reaches live fallback."""
+    first, second = retrieval_result(hits=[make_hit("a1", "attempt one evidence")]), retrieval_result(
+        hits=[make_hit("b1", "attempt two evidence")]
+    )
+    llm = FakeLLMProvider('{"score":90}', '{"score":25}', REWRITE_JSON, '{"score":40}')
+    deps, provider, retrieval = dependencies(llm=llm, results=[first, second], live=live, live_error=live_error)
+    return deps, provider, retrieval, second
 
 
 def user_payload(call) -> str:
@@ -461,15 +523,15 @@ async def test_retry_then_sufficient_uses_rewritten_query_and_grades_original_qu
     assert result["terminal_reason"] is None
     assert result["error_category"] is None
     assert result["generated_answer"] is None
-    assert result["live_fallback_used"] is False
-    assert result["live_evidence"] is None
+    deps.live_search_service.search.assert_not_awaited()
+    assert_no_downstream_progress_after_rewrite(result)
 
 
 @pytest.mark.anyio
-async def test_retry_still_insufficient_completes_without_third_attempt() -> None:
+async def test_exhausted_with_fallback_disabled_is_insufficient_evidence_without_live_search() -> None:
     deps, provider, retrieval, _, second = retry_dependencies(REWRITE_JSON, '{"score":40}')
 
-    result = await run(deps, INDIA_QUESTION)
+    result = await run(deps, INDIA_QUESTION, LOCAL_ONLY)
 
     assert statuses(result) == RETRY_INSUFFICIENT_PATH
     assert S.GRAPH_FAILED not in statuses(result)
@@ -482,10 +544,10 @@ async def test_retry_still_insufficient_completes_without_third_attempt() -> Non
     assert result["local_retrieval_result"] == second
     assert result["evidence_sufficient"] is False
     assert result["evidence_grade"] == EvidenceGrade(score=40, sufficient=False, source_count=2)
-    assert result["terminal_reason"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
     assert result["error_category"] is None
-    assert result["generated_answer"] is None
-    assert result["live_fallback_used"] is False
+    deps.live_search_service.search.assert_not_awaited()
+    assert_no_downstream_progress_after_rewrite(result)
 
 
 @pytest.mark.anyio
@@ -525,7 +587,7 @@ async def test_empty_first_retrieval_is_rewritten_and_retried_under_default_conf
         llm=FakeLLMProvider('{"score":90}', REWRITE_JSON), results=[empty, empty]
     )
 
-    result = await run(deps)
+    result = await run(deps, config=LOCAL_ONLY)
 
     assert statuses(result) == RETRY_INSUFFICIENT_PATH
     assert len(provider.calls) == 2
@@ -602,9 +664,7 @@ async def test_second_grading_failure_does_not_restore_first_grade_or_retry(fail
         real = deps.evidence_context_builder
         builder = Mock(spec=EvidenceContextBuilder)
         builder.build.side_effect = [real.build(retrieval_result()), RuntimeError("private grader detail")]
-        deps = AgentGraphDependencies(
-            llm_provider=provider, hybrid_search_service=retrieval, evidence_context_builder=builder
-        )
+        deps = dataclasses.replace(deps, evidence_context_builder=builder)
 
     result = await run(deps)
 
@@ -666,7 +726,7 @@ async def test_total_attempts_follow_configuration_and_never_exceed_it() -> None
     )
     deps, provider, retrieval = dependencies(llm=llm)
 
-    result = await run(deps, config=AgentGraphConfig(max_local_retrieval_attempts=3))
+    result = await run(deps, config=AgentGraphConfig(max_local_retrieval_attempts=3, live_fallback_enabled=False))
 
     assert [call.args[0] for call in retrieval.search.call_args_list] == [
         "AI question",
@@ -678,7 +738,7 @@ async def test_total_attempts_follow_configuration_and_never_exceed_it() -> None
     assert result["rewritten_query"] == "second rewrite"
     assert result["evidence_sufficient"] is False
     assert statuses(result)[-1] == S.GRAPH_COMPLETED
-    assert result["terminal_reason"] is None
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
 
 
 @pytest.mark.anyio
@@ -699,6 +759,168 @@ async def test_retrieval_node_refuses_to_exceed_configured_attempts(attempts: in
     assert result["error_category"] == AgentErrorCategory.INTERNAL_FAILURE
 
 
+@pytest.mark.anyio
+async def test_live_fallback_discovers_candidates_after_local_exhaustion() -> None:
+    candidates = live_result("2501.00001", "2501.00002", "2501.00003")
+    deps, provider, retrieval, second = exhausted_dependencies(live=candidates)
+
+    result = await run(deps, INDIA_QUESTION)
+
+    assert statuses(result) == LIVE_COMPLETED_PATH
+    assert [event.sequence for event in result["execution_events"]] == list(range(16))
+    assert S.GRAPH_COMPLETED not in statuses(result)[:-1]
+    deps.live_search_service.search.assert_awaited_once_with(
+        REWRITTEN, max_results=5, exclude_arxiv_ids=("2401.00001",)
+    )
+    assert [call.args[0] for call in retrieval.search.call_args_list] == [INDIA_QUESTION, REWRITTEN]
+    assert len(provider.calls) == 4
+    assert statuses(result).count(S.QUERY_REWRITTEN) == 1
+    assert result["original_question"] == INDIA_QUESTION
+    assert result["current_query"] == REWRITTEN
+    assert result["retrieval_attempts"] == 2
+    assert result["live_fallback_used"] is True
+    assert result["live_search_result"] == candidates
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is False
+    assert result["evidence_grade"] == EvidenceGrade(score=40, sufficient=False, source_count=1)
+    assert result["terminal_reason"] is None
+    assert result["error_category"] is None
+    assert result["live_evidence"] is None
+    assert result["final_evidence"] is None
+    assert result["generated_answer"] is None
+    started, completed = result["execution_events"][13:15]
+    assert started.metadata.model_dump(exclude_none=True) == {"live_fallback_used": True, "max_results": 5}
+    assert completed.metadata.model_dump(exclude_none=True) == {
+        "live_fallback_used": True,
+        "max_results": 5,
+        "candidate_count": 3,
+    }
+
+
+@pytest.mark.anyio
+async def test_live_search_uses_configured_bound_even_if_service_returns_more() -> None:
+    deps, _, _, _ = exhausted_dependencies(live=live_result("2501.00001", "2501.00002", "2501.00003"))
+
+    result = await run(deps, config=AgentGraphConfig(live_arxiv_max_results=2))
+
+    assert deps.live_search_service.search.await_args.kwargs["max_results"] == 2
+    assert [paper.arxiv_id for paper in result["live_search_result"].candidates] == ["2501.00001", "2501.00002"]
+    assert result["execution_events"][14].metadata.candidate_count == 2
+
+
+@pytest.mark.anyio
+async def test_single_attempt_config_falls_back_live_with_unrewritten_query() -> None:
+    deps, provider, retrieval = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":25}'))
+
+    result = await run(deps, INDIA_QUESTION, AgentGraphConfig(max_local_retrieval_attempts=1))
+
+    assert statuses(result) == [
+        *FIRST_INSUFFICIENT,
+        S.LIVE_FALLBACK_STARTED,
+        S.LIVE_FALLBACK_COMPLETED,
+        S.GRAPH_COMPLETED,
+    ]
+    assert deps.live_search_service.search.await_args.args == (INDIA_QUESTION,)
+    assert len(provider.calls) == 2
+    retrieval.search.assert_called_once()
+    assert result["rewritten_query"] is None
+    assert result["live_fallback_used"] is True
+
+
+@pytest.mark.anyio
+async def test_live_search_with_zero_candidates_is_insufficient_evidence_not_failure() -> None:
+    empty = live_result()
+    deps, _, retrieval, second = exhausted_dependencies(live=empty)
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_COMPLETED_PATH
+    assert S.GRAPH_FAILED not in statuses(result)
+    deps.live_search_service.search.assert_awaited_once()
+    assert result["live_fallback_used"] is True
+    assert result["live_search_result"] == empty
+    assert result["live_search_result"].count == 0
+    assert result["execution_events"][14].metadata.candidate_count == 0
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is False
+    assert result["terminal_reason"] == TerminalReason.INSUFFICIENT_EVIDENCE
+    assert result["error_category"] is None
+    assert retrieval.search.call_count == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("error", [LiveSearchError("private live detail"), RuntimeError("private live detail")])
+async def test_live_search_failure_is_distinct_from_zero_candidates(error: Exception) -> None:
+    deps, provider, retrieval, second = exhausted_dependencies(live_error=error)
+
+    result = await run(deps)
+
+    assert statuses(result) == LIVE_FAILED_PATH
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    deps.live_search_service.search.assert_awaited_once()
+    assert result["live_fallback_used"] is True
+    assert result["live_search_result"] is None
+    assert result["local_retrieval_result"] == second
+    assert result["evidence_sufficient"] is False
+    assert result["retrieval_attempts"] == 2
+    assert result["terminal_reason"] == TerminalReason.INTERNAL_ERROR
+    assert result["error_category"] == AgentErrorCategory.LIVE_SEARCH_FAILURE
+    assert retrieval.search.call_count == 2
+    assert len(provider.calls) == 4
+    assert "private live detail" not in repr([event.model_dump(mode="json") for event in result["execution_events"]])
+    assert "private live detail" not in repr(
+        {key: value for key, value in result.items() if key != "local_retrieval_result"}
+    )
+
+
+@pytest.mark.anyio
+async def test_live_search_is_skipped_when_first_attempt_is_sufficient() -> None:
+    deps, _, _ = dependencies()
+
+    result = await run(deps)
+
+    assert statuses(result) == SUFFICIENT_PATH
+    deps.live_search_service.search.assert_not_awaited()
+    assert result["live_fallback_used"] is False
+    assert result["live_search_result"] is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "llm",
+    [
+        FakeLLMProvider('{"score":1}'),
+        FakeLLMProvider("invalid"),
+        FakeLLMProvider('{"score":90}', "invalid"),
+        FakeLLMProvider('{"score":90}', '{"score":25}', "invalid"),
+    ],
+)
+async def test_live_search_is_never_reached_from_earlier_terminal_paths(llm: FakeLLMProvider) -> None:
+    deps, _, _ = dependencies(llm=FakeLLMProvider(*llm.responses))
+
+    result = await run(deps)
+
+    deps.live_search_service.search.assert_not_awaited()
+    assert result["live_fallback_used"] is False
+    assert S.LIVE_FALLBACK_STARTED not in statuses(result)
+
+
+def test_enabled_live_fallback_requires_a_live_search_service() -> None:
+    deps, provider, retrieval = dependencies()
+    without_live = AgentGraphDependencies(
+        llm_provider=provider,
+        hybrid_search_service=retrieval,
+        evidence_context_builder=deps.evidence_context_builder,
+    )
+
+    with pytest.raises(ValueError, match="live_search_service is required"):
+        build_agent_graph(dependencies=without_live)
+
+    graph = build_agent_graph(dependencies=without_live, config=LOCAL_ONLY).get_graph()
+    assert "live_arxiv_search" not in graph.nodes
+    assert "insufficient_evidence" in graph.nodes
+
+
 def scenario_dependencies():
     """One (dependencies, config) pair per distinct graph path."""
     return [
@@ -716,6 +938,9 @@ def scenario_dependencies():
         (retry_dependencies(RuntimeError("down"))[0], None),
         (retry_dependencies(REWRITE_JSON, "invalid")[0], None),
         (retry_dependencies(REWRITE_JSON, results=[retrieval_result(), RuntimeError("down")])[0], None),
+        (retry_dependencies(REWRITE_JSON, '{"score":40}')[0], LOCAL_ONLY),
+        (exhausted_dependencies(live=live_result())[0], None),
+        (exhausted_dependencies(live_error=LiveSearchError("down"))[0], None),
     ]
 
 
@@ -729,6 +954,7 @@ async def test_every_path_has_exactly_one_terminal_event_and_contiguous_sequence
         assert [event.sequence for event in result["execution_events"]] == list(range(len(path)))
         assert path.count(S.LOCAL_RETRIEVAL_STARTED) <= 2
         assert path.count(S.QUERY_REWRITE_STARTED) <= 1
+        assert path.count(S.LIVE_FALLBACK_STARTED) <= 1
         assert result["retrieval_attempts"] <= 2
 
 
@@ -762,6 +988,12 @@ async def test_events_are_deterministic_and_content_free(responses: tuple[str, .
         REWRITTEN,
         EVIDENCE_TEXT,
         "Private Paper Title",
+        "Private Live Title",
+        "private live abstract",
+        "Private Author",
+        "cs.CY",
+        "arxiv.org",
+        "live query",
         "UNTRUSTED_QUESTION_JSON",
         "UNTRUSTED_GRADING_INPUT_JSON",
         "UNTRUSTED_REWRITE_INPUT_JSON",

@@ -24,6 +24,8 @@ def test_execution_event_has_deterministic_representation() -> None:
             "next_retrieval_attempt": None,
             "source_count": 5,
             "live_fallback_used": None,
+            "max_results": None,
+            "candidate_count": None,
             "guardrail_passed": None,
             "guardrail_score": None,
             "evidence_sufficient": None,
@@ -79,3 +81,20 @@ def test_next_retrieval_attempt_metadata_is_bounded() -> None:
 def test_query_rewrite_failure_is_a_distinct_error_category() -> None:
     assert AgentErrorCategory.QUERY_REWRITE_FAILURE.value == "query_rewrite_failure"
     assert AgentErrorCategory.QUERY_REWRITE_FAILURE is not AgentErrorCategory.EVIDENCE_GRADING_FAILURE
+
+
+def test_live_fallback_metadata_is_bounded_and_count_only() -> None:
+    metadata = AgentExecutionMetadata(live_fallback_used=True, max_results=5, candidate_count=0)
+
+    assert metadata.candidate_count == 0
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(candidate_count=-1)
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(max_results=0)
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(title="Private Title")  # type: ignore[call-arg]
+
+
+def test_live_search_failure_is_a_distinct_error_category() -> None:
+    assert AgentErrorCategory.LIVE_SEARCH_FAILURE.value == "live_search_failure"
+    assert AgentErrorCategory.LIVE_SEARCH_FAILURE is not AgentErrorCategory.RETRIEVAL_FAILURE

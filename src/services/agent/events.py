@@ -40,6 +40,8 @@ class AgentExecutionMetadata(BaseModel):
     next_retrieval_attempt: int | None = Field(default=None, ge=2)
     source_count: int | None = Field(default=None, ge=0)
     live_fallback_used: bool | None = None
+    max_results: int | None = Field(default=None, ge=1)
+    candidate_count: int | None = Field(default=None, ge=0)
     guardrail_passed: bool | None = None
     guardrail_score: int | None = Field(default=None, ge=0, le=100)
     evidence_sufficient: bool | None = None

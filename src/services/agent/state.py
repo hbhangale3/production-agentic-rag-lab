@@ -6,6 +6,7 @@ from typing import Annotated, TypedDict
 
 from src.schemas.hybrid_search import HybridSearchResult
 from src.services.agent.events import AgentExecutionEvent
+from src.services.agent.live_search import LiveArxivSearchResult
 from src.services.agent.types import AgentErrorCategory, TerminalReason
 from src.services.evidence import EvidenceSource
 
@@ -41,6 +42,7 @@ class AgentState(TypedDict):
     evidence_sufficient: bool | None
     evidence_grade: EvidenceGrade | None
     live_fallback_used: bool
+    live_search_result: LiveArxivSearchResult | None
     live_evidence: tuple[EvidenceSource, ...] | None
     final_evidence: tuple[EvidenceSource, ...] | None
     generated_answer: str | None
@@ -67,6 +69,7 @@ def create_initial_agent_state(question: str) -> AgentState:
         evidence_sufficient=None,
         evidence_grade=None,
         live_fallback_used=False,
+        live_search_result=None,
         live_evidence=None,
         final_evidence=None,
         generated_answer=None,

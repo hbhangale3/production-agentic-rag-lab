@@ -1,4 +1,4 @@
-"""LangGraph topology for guardrail, bounded local retrieval, grading, and one-shot query rewrite."""
+"""LangGraph topology for guardrail, bounded local retrieval and rewrite, grading, and live discovery."""
 
 import asyncio
 from dataclasses import dataclass
@@ -10,6 +10,7 @@ from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
 from src.services.agent.evidence_grader import EvidenceGradingError, EvidenceSufficiencyGrader
 from src.services.agent.guardrail import GuardrailEvaluationError, GuardrailEvaluator
+from src.services.agent.live_search import LiveArxivSearchResult, LiveResearchSearchService
 from src.services.agent.query_rewriter import QueryRewriteError, QueryRewriter
 from src.services.agent.state import AgentState
 from src.services.agent.types import AgentErrorCategory, TerminalReason
@@ -19,7 +20,8 @@ from src.services.search.hybrid_service import HybridSearchService
 
 GuardrailRoute = Literal["passed", "rejected", "failed"]
 RetrievalRoute = Literal["retrieved", "failed"]
-EvidenceRoute = Literal["sufficient", "rewrite", "exhausted", "failed"]
+EvidenceRoute = Literal["sufficient", "rewrite", "live_fallback", "exhausted", "failed"]
+LiveSearchRoute = Literal["candidates", "empty", "failed"]
 RewriteRoute = Literal["rewritten", "failed"]
 
 
@@ -30,6 +32,7 @@ class AgentGraphDependencies:
     llm_provider: LLMProvider
     hybrid_search_service: HybridSearchService
     evidence_context_builder: EvidenceContextBuilder
+    live_search_service: LiveResearchSearchService | None = None
 
 
 def _next_sequence(state: AgentState) -> int:
@@ -228,7 +231,7 @@ def _make_evidence_router(config: AgentGraphConfig):
             return "sufficient"
         if state["retrieval_attempts"] < config.max_local_retrieval_attempts:
             return "rewrite"
-        return "exhausted"
+        return "live_fallback" if config.live_fallback_enabled else "exhausted"
 
     return route_after_evidence_grading
 
@@ -278,6 +281,71 @@ def _route_after_query_rewrite(state: AgentState) -> RewriteRoute:
     return "failed" if state["error_category"] is not None else "rewritten"
 
 
+def _make_live_search_node(service: LiveResearchSearchService, config: AgentGraphConfig):
+    async def live_arxiv_search(state: AgentState) -> dict[str, Any]:
+        sequence = _next_sequence(state)
+        max_results = config.live_arxiv_max_results
+        started = AgentExecutionEvent(
+            status=AgentExecutionStatus.LIVE_FALLBACK_STARTED,
+            sequence=sequence,
+            metadata=AgentExecutionMetadata(live_fallback_used=True, max_results=max_results),
+        )
+        local_result = state["local_retrieval_result"]
+        local_arxiv_ids = tuple(hit.arxiv_id for hit in local_result.results) if local_result else ()
+        try:
+            result = await service.search(
+                state["current_query"],
+                max_results=max_results,
+                exclude_arxiv_ids=local_arxiv_ids,
+            )
+            if result.count > max_results:
+                result = LiveArxivSearchResult(query=result.query, candidates=result.candidates[:max_results])
+        except Exception:
+            return {
+                "live_fallback_used": True,
+                "live_search_result": None,
+                "terminal_reason": TerminalReason.INTERNAL_ERROR,
+                "error_category": AgentErrorCategory.LIVE_SEARCH_FAILURE,
+                "execution_events": [
+                    started,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
+                ],
+            }
+        return {
+            "live_fallback_used": True,
+            "live_search_result": result,
+            "execution_events": [
+                started,
+                AgentExecutionEvent(
+                    status=AgentExecutionStatus.LIVE_FALLBACK_COMPLETED,
+                    sequence=sequence + 1,
+                    metadata=AgentExecutionMetadata(
+                        live_fallback_used=True,
+                        max_results=max_results,
+                        candidate_count=result.count,
+                    ),
+                ),
+            ],
+        }
+
+    return live_arxiv_search
+
+
+def _route_after_live_search(state: AgentState) -> LiveSearchRoute:
+    if state["error_category"] is not None:
+        return "failed"
+    return "candidates" if state["live_search_result"].count else "empty"
+
+
+def _complete_insufficient_evidence(state: AgentState) -> dict[str, Any]:
+    return {
+        "terminal_reason": TerminalReason.INSUFFICIENT_EVIDENCE,
+        "execution_events": [
+            AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_COMPLETED, sequence=_next_sequence(state))
+        ],
+    }
+
+
 def _complete_graph(state: AgentState) -> dict[str, Any]:
     return {
         "execution_events": [
@@ -291,9 +359,11 @@ def build_agent_graph(
     dependencies: AgentGraphDependencies,
     config: AgentGraphConfig | None = None,
 ) -> CompiledStateGraph:
-    """Compile W7-M04 with injected services and no infrastructure creation."""
+    """Compile W7-M05 with injected services and no infrastructure creation."""
 
     graph_config = config or AgentGraphConfig()
+    if graph_config.live_fallback_enabled and dependencies.live_search_service is None:
+        raise ValueError("live_search_service is required when live_fallback_enabled is true")
     evaluator = GuardrailEvaluator(llm_provider=dependencies.llm_provider)
     grader = EvidenceSufficiencyGrader(llm_provider=dependencies.llm_provider)
     rewriter = QueryRewriter(llm_provider=dependencies.llm_provider)
@@ -308,6 +378,14 @@ def build_agent_graph(
         _make_evidence_grading_node(grader, dependencies.evidence_context_builder, graph_config),
     )
     builder.add_node("query_rewrite", _make_query_rewrite_node(rewriter))
+    if graph_config.live_fallback_enabled:
+        builder.add_node("live_arxiv_search", _make_live_search_node(dependencies.live_search_service, graph_config))
+        builder.add_conditional_edges(
+            "live_arxiv_search",
+            _route_after_live_search,
+            {"candidates": "graph_complete", "empty": "insufficient_evidence", "failed": END},
+        )
+    builder.add_node("insufficient_evidence", _complete_insufficient_evidence)
     builder.add_node("graph_complete", _complete_graph)
     builder.add_edge(START, "graph_start")
     builder.add_edge("graph_start", "guardrail")
@@ -328,7 +406,8 @@ def build_agent_graph(
         {
             "sufficient": "graph_complete",
             "rewrite": "query_rewrite",
-            "exhausted": "graph_complete",
+            "live_fallback": "live_arxiv_search" if graph_config.live_fallback_enabled else "insufficient_evidence",
+            "exhausted": "insufficient_evidence",
             "failed": END,
         },
     )
@@ -337,5 +416,6 @@ def build_agent_graph(
         _route_after_query_rewrite,
         {"rewritten": "local_retrieval", "failed": END},
     )
+    builder.add_edge("insufficient_evidence", END)
     builder.add_edge("graph_complete", END)
     return builder.compile()

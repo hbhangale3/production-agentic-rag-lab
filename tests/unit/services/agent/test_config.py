@@ -12,6 +12,7 @@ def test_graph_config_defaults_are_bounded() -> None:
     assert config.retrieval_size == 5
     assert config.max_grounding_attempts == 2
     assert config.live_fallback_enabled is True
+    assert config.live_arxiv_max_results == 5
 
 
 @pytest.mark.parametrize("threshold", [0, 100])
@@ -60,3 +61,14 @@ def test_evidence_sufficiency_threshold_boundaries_are_valid(threshold: int) -> 
 def test_invalid_evidence_sufficiency_threshold_is_rejected(threshold: int) -> None:
     with pytest.raises(ValidationError):
         AgentGraphConfig(evidence_sufficiency_threshold=threshold)
+
+
+@pytest.mark.parametrize("limit", [1, 10])
+def test_live_arxiv_max_results_boundaries_are_valid(limit: int) -> None:
+    assert AgentGraphConfig(live_arxiv_max_results=limit).live_arxiv_max_results == limit
+
+
+@pytest.mark.parametrize("limit", [0, -1, 11, 100])
+def test_live_arxiv_max_results_must_stay_small(limit: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(live_arxiv_max_results=limit)

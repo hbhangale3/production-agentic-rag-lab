@@ -18,6 +18,7 @@ def test_initial_state_preserves_question_and_initializes_future_fields() -> Non
     assert state["rewritten_query"] is None
     assert state["evidence_sufficient"] is None
     assert state["evidence_grade"] is None
+    assert state["live_search_result"] is None
     assert state["live_evidence"] is None
     assert state["final_evidence"] is None
     assert state["generated_answer"] is None
