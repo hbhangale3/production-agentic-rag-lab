@@ -53,7 +53,7 @@ class Settings(DefaultSettings):
     llm_max_retries: int = Field(default=2, ge=0)
     evidence_context_max_tokens: int = Field(default=6000, gt=0)
     llm_temperature: float = Field(default=0.1, ge=0, le=2)
-    llm_max_completion_tokens: int = Field(default=512, gt=0)
+    llm_max_completion_tokens: int = Field(default=1024, gt=0)
     llm_context_window_tokens: int = Field(default=8192, gt=0)
     llm_token_safety_margin: int = Field(default=256, ge=0)
     rag_retrieval_size: int = Field(default=5, gt=0, le=100)

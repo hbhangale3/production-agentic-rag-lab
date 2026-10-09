@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -40,6 +40,29 @@ class LLMCompletion:
                 raise ValueError(f"{field_name} must be a non-negative integer or None")
 
 
+@dataclass(frozen=True)
+class LLMStreamEvent:
+    """Normalized provider stream update.
+
+    Text may be absent on metadata-only terminal chunks.
+    """
+
+    text: str | None = None
+    model: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.text is not None and not isinstance(self.text, str):
+            raise ValueError("stream text must be a string or None")
+        if self.model is not None and (not isinstance(self.model, str) or not self.model.strip()):
+            raise ValueError("stream model must be a non-empty string or None")
+        for field_name in ("prompt_tokens", "completion_tokens"):
+            value = getattr(self, field_name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative integer or None")
+
+
 class LLMProvider(Protocol):
     """Asynchronous provider-neutral chat completion boundary."""
 
@@ -51,6 +74,16 @@ class LLMProvider(Protocol):
         max_tokens: int | None = None,
     ) -> LLMCompletion:
         """Create one non-streaming chat completion."""
+        ...
+
+    def stream(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        """Stream provider-neutral chat completion updates."""
         ...
 
     async def close(self) -> None:

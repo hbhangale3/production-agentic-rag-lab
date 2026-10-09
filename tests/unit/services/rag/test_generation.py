@@ -12,8 +12,13 @@ from src.exceptions import (
 )
 from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
 from src.services.evidence import CharacterTokenEstimator, EvidenceContextBuilder
-from src.services.llm.base import ChatMessage, LLMCompletion
-from src.services.rag import RAGGenerationService, RAGPromptBuilder
+from src.services.llm.base import ChatMessage, LLMCompletion, LLMStreamEvent
+from src.services.rag import (
+    RAGGenerationService,
+    RAGPromptBuilder,
+    RAGStreamComplete,
+    RAGStreamDelta,
+)
 
 
 @dataclass
@@ -27,9 +32,8 @@ class FakeLLMProvider:
         )
     )
     error: Exception | None = None
-    calls: list[tuple[tuple[ChatMessage, ...], float | None, int | None]] = field(
-        default_factory=list
-    )
+    stream_events: tuple[LLMStreamEvent, ...] = ()
+    calls: list[tuple[tuple[ChatMessage, ...], float | None, int | None]] = field(default_factory=list)
 
     async def complete(
         self,
@@ -45,6 +49,13 @@ class FakeLLMProvider:
 
     async def close(self) -> None:
         return None
+
+    async def stream(self, messages, *, temperature=None, max_tokens=None):
+        self.calls.append((tuple(messages), temperature, max_tokens))
+        if self.error:
+            raise self.error
+        for event in self.stream_events:
+            yield event
 
 
 def hit(chunk_id: str, text: str, *, index: int = 0) -> HybridSearchHit:
@@ -217,9 +228,7 @@ async def test_provider_errors_are_propagated_without_wrapping(error: Exception)
 
 @pytest.mark.anyio
 async def test_unknown_citation_is_rejected_without_inventing_source_mapping() -> None:
-    provider = FakeLLMProvider(
-        completion=LLMCompletion(content="Unsupported claim [S9].", model="fake-model")
-    )
+    provider = FakeLLMProvider(completion=LLMCompletion(content="Unsupported claim [S9].", model="fake-model"))
 
     with pytest.raises(LLMResponseError, match="unsupported citation"):
         await service(provider).generate(
@@ -230,9 +239,7 @@ async def test_unknown_citation_is_rejected_without_inventing_source_mapping() -
 
 @pytest.mark.anyio
 async def test_fullwidth_provider_citations_are_canonicalized_and_validated() -> None:
-    provider = FakeLLMProvider(
-        completion=LLMCompletion(content="Supported claim 【S1】.", model="fake-model")
-    )
+    provider = FakeLLMProvider(completion=LLMCompletion(content="Supported claim 【S1】.", model="fake-model"))
 
     result = await service(provider).generate(
         question="Question",
@@ -263,9 +270,7 @@ async def test_answer_without_citations_is_retained_for_insufficiency_language()
 
 @pytest.mark.anyio
 async def test_truncated_source_matches_the_evidence_sent_to_provider() -> None:
-    provider = FakeLLMProvider(
-        completion=LLMCompletion(content="A constrained excerpt is available [S1].", model="fake")
-    )
+    provider = FakeLLMProvider(completion=LLMCompletion(content="A constrained excerpt is available [S1].", model="fake"))
     instance = service(provider, evidence_budget=35)
 
     result = await instance.generate(
@@ -281,9 +286,7 @@ async def test_truncated_source_matches_the_evidence_sent_to_provider() -> None:
 
 @pytest.mark.anyio
 async def test_retrieval_and_selected_evidence_are_not_mutated() -> None:
-    provider = FakeLLMProvider(
-        completion=LLMCompletion(content="Supported [S1].", model="fake")
-    )
+    provider = FakeLLMProvider(completion=LLMCompletion(content="Supported [S1].", model="fake"))
     retrieval_result = retrieval(hit("chunk", "Evidence"))
     before = deepcopy(retrieval_result.model_dump())
 
@@ -333,3 +336,50 @@ def test_service_reads_generation_settings() -> None:
     assert instance.max_completion_tokens == 400
     assert instance.context_window_tokens == 9000
     assert instance.token_safety_margin == 300
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("Supported 【", "S1】 and ", "【S2】."),
+        ("Supported 【S", "1", "】 and 【", "S", "2", "】."),
+    ],
+)
+async def test_stream_normalizes_split_citations_and_returns_terminal_metadata(parts) -> None:
+    provider = FakeLLMProvider(
+        stream_events=tuple(LLMStreamEvent(text=part, model="fake-model") for part in parts)
+        + (LLMStreamEvent(model="fake-model", prompt_tokens=100, completion_tokens=12),)
+    )
+    instance = service(provider)
+    prepared = instance.prepare(
+        question="Question",
+        retrieval_result=retrieval(hit("one", "Evidence one"), hit("two", "Evidence two", index=1)),
+    )
+
+    events = [event async for event in instance.stream_generate(prepared)]
+
+    assert "".join(event.text for event in events if isinstance(event, RAGStreamDelta)) == ("Supported [S1] and [S2].")
+    terminal = events[-1]
+    assert terminal == RAGStreamComplete(
+        model="fake-model",
+        prompt_tokens=100,
+        completion_tokens=12,
+        cited_labels=("[S1]", "[S2]"),
+    )
+    messages, temperature, max_tokens = provider.calls[0]
+    assert "Use only the supplied evidence" in messages[0].content
+    assert temperature == 0.1
+    assert max_tokens == 512
+
+
+@pytest.mark.anyio
+async def test_stream_unknown_citation_fails_after_incremental_text() -> None:
+    provider = FakeLLMProvider(stream_events=(LLMStreamEvent(text="Unsupported [S99].", model="fake"),))
+    instance = service(provider)
+    prepared = instance.prepare(question="Question", retrieval_result=retrieval(hit("one", "Evidence")))
+    iterator = instance.stream_generate(prepared)
+
+    assert await anext(iterator) == RAGStreamDelta(text="Unsupported [S99].")
+    with pytest.raises(LLMResponseError, match="unsupported citation"):
+        await anext(iterator)

@@ -66,7 +66,7 @@ def test_week5_llm_defaults_do_not_require_credentials() -> None:
     assert settings.llm_max_retries == 2
     assert settings.evidence_context_max_tokens == 6000
     assert settings.llm_temperature == 0.1
-    assert settings.llm_max_completion_tokens == 512
+    assert settings.llm_max_completion_tokens == 1024
     assert settings.llm_context_window_tokens == 8192
     assert settings.llm_token_safety_margin == 256
     assert settings.rag_retrieval_size == 5

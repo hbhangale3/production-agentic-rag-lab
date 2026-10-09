@@ -5,7 +5,7 @@ import groq
 import httpx
 import pytest
 from src.exceptions import LLMRequestError, LLMResponseError
-from src.services.llm.base import ChatMessage, LLMCompletion
+from src.services.llm.base import ChatMessage, LLMCompletion, LLMStreamEvent
 from src.services.llm.groq_provider import GroqLLMProvider
 
 
@@ -29,11 +29,30 @@ def completion(
 
 def provider(*, response=None, owns_client: bool = False):
     client = Mock()
-    client.chat.completions.create = AsyncMock(
-        return_value=response if response is not None else completion()
-    )
+    client.chat.completions.create = AsyncMock(return_value=response if response is not None else completion())
     client.close = AsyncMock()
     return GroqLLMProvider(client=client, model="configured-model", owns_client=owns_client), client
+
+
+class FakeStream:
+    def __init__(self, chunks, error: Exception | None = None):
+        self.chunks = chunks
+        self.error = error
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+        if self.error:
+            raise self.error
+
+    async def close(self):
+        self.closed = True
+
+
+def stream_chunk(text=None, *, model="stream-model", usage=None, choices=True):
+    values = [SimpleNamespace(delta=SimpleNamespace(content=text))] if choices else []
+    return SimpleNamespace(choices=values, model=model, usage=usage)
 
 
 @pytest.mark.anyio
@@ -194,4 +213,65 @@ async def test_externally_owned_client_is_reused_and_not_closed() -> None:
     await instance.close()
 
     assert client.chat.completions.create.await_count == 2
+    client.close.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_stream_normalizes_deltas_metadata_and_usage_and_closes_stream() -> None:
+    usage = SimpleNamespace(prompt_tokens=21, completion_tokens=8)
+    sdk_stream = FakeStream(
+        [
+            stream_chunk("Hello "),
+            stream_chunk(None),
+            stream_chunk("世界"),
+            stream_chunk(choices=False, usage=usage),
+        ]
+    )
+    instance, client = provider(response=sdk_stream)
+
+    events = [
+        event async for event in instance.stream([ChatMessage(role="user", content="Question")], temperature=0.2, max_tokens=64)
+    ]
+
+    assert events == [
+        LLMStreamEvent(text="Hello ", model="stream-model"),
+        LLMStreamEvent(text="世界", model="stream-model"),
+        LLMStreamEvent(model="stream-model", prompt_tokens=21, completion_tokens=8),
+    ]
+    assert client.chat.completions.create.await_args.kwargs["stream"] is True
+    assert sdk_stream.closed is True
+    client.close.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_stream_iteration_failure_is_mapped_and_stream_is_closed() -> None:
+    request = httpx.Request("POST", "https://api.groq.test/chat/completions")
+    sdk_stream = FakeStream(
+        [stream_chunk("partial")],
+        groq.APIConnectionError(message="secret response", request=request),
+    )
+    instance, _ = provider(response=sdk_stream)
+
+    with pytest.raises(LLMRequestError, match="connect") as caught:
+        _ = [event async for event in instance.stream([ChatMessage(role="user", content="Question")])]
+
+    assert "secret" not in str(caught.value)
+    assert sdk_stream.closed is True
+
+
+@pytest.mark.anyio
+async def test_closing_one_stream_does_not_close_provider_and_next_stream_works() -> None:
+    first_stream = FakeStream([stream_chunk("first"), stream_chunk("unused")])
+    second_stream = FakeStream([stream_chunk("second")])
+    instance, client = provider()
+    client.chat.completions.create.side_effect = [first_stream, second_stream]
+    iterator = instance.stream([ChatMessage(role="user", content="Question")])
+
+    assert (await anext(iterator)).text == "first"
+    await iterator.aclose()
+    later = [event.text async for event in instance.stream([ChatMessage(role="user", content="Again")])]
+
+    assert first_stream.closed is True
+    assert later == ["second"]
+    assert second_stream.closed is True
     client.close.assert_not_awaited()
