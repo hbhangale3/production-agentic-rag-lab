@@ -7,6 +7,7 @@ def test_graph_config_defaults_are_bounded() -> None:
     config = AgentGraphConfig()
 
     assert config.guardrail_threshold == 60
+    assert config.evidence_sufficiency_threshold == 60
     assert config.max_local_retrieval_attempts == 2
     assert config.retrieval_size == 5
     assert config.max_grounding_attempts == 2
@@ -48,3 +49,14 @@ def test_two_local_attempts_mean_initial_plus_one_retry() -> None:
 
 def test_live_fallback_can_be_disabled() -> None:
     assert AgentGraphConfig(live_fallback_enabled=False).live_fallback_enabled is False
+
+
+@pytest.mark.parametrize("threshold", [0, 100])
+def test_evidence_sufficiency_threshold_boundaries_are_valid(threshold: int) -> None:
+    assert AgentGraphConfig(evidence_sufficiency_threshold=threshold).evidence_sufficiency_threshold == threshold
+
+
+@pytest.mark.parametrize("threshold", [-1, 101])
+def test_invalid_evidence_sufficiency_threshold_is_rejected(threshold: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentGraphConfig(evidence_sufficiency_threshold=threshold)

@@ -13,6 +13,7 @@ class AgentGraphConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     guardrail_threshold: int = Field(default=60, ge=0, le=100)
+    evidence_sufficiency_threshold: int = Field(default=60, ge=0, le=100)
     max_local_retrieval_attempts: int = Field(default=2, ge=1)
     retrieval_size: int = Field(default=5, ge=1)
     max_grounding_attempts: int = Field(default=2, ge=1)

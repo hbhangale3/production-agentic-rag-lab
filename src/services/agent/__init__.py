@@ -2,6 +2,11 @@
 
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
+from src.services.agent.evidence_grader import (
+    EvidenceGraderPromptBuilder,
+    EvidenceGradingError,
+    EvidenceSufficiencyGrader,
+)
 from src.services.agent.graph import AgentGraphDependencies, build_agent_graph
 from src.services.agent.guardrail import (
     GuardrailEvaluationError,
@@ -21,6 +26,9 @@ __all__ = [
     "AgentGraphDependencies",
     "AgentState",
     "EvidenceGrade",
+    "EvidenceGraderPromptBuilder",
+    "EvidenceGradingError",
+    "EvidenceSufficiencyGrader",
     "GuardrailEvaluationError",
     "GuardrailEvaluator",
     "GuardrailPromptBuilder",

@@ -12,15 +12,18 @@ from src.services.evidence import EvidenceSource
 
 @dataclass(frozen=True)
 class EvidenceGrade:
-    """Content-free evidence sufficiency result reserved for a future grader."""
+    """Content-free evidence sufficiency result; never reasoning or evidence text."""
 
     score: int
+    sufficient: bool
     source_count: int
     grader_version: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.score, bool) or not isinstance(self.score, int) or not 0 <= self.score <= 100:
             raise ValueError("evidence grade score must be between 0 and 100")
+        if not isinstance(self.sufficient, bool):
+            raise ValueError("evidence grade sufficient must be a boolean")
         if isinstance(self.source_count, bool) or not isinstance(self.source_count, int) or self.source_count < 0:
             raise ValueError("evidence grade source_count must be non-negative")
 

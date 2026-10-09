@@ -42,6 +42,7 @@ class AgentExecutionMetadata(BaseModel):
     guardrail_passed: bool | None = None
     guardrail_score: int | None = Field(default=None, ge=0, le=100)
     evidence_sufficient: bool | None = None
+    evidence_score: int | None = Field(default=None, ge=0, le=100)
     grounding_passed: bool | None = None
 
 

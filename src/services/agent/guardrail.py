@@ -1,14 +1,13 @@
 """Provider-neutral domain guardrail evaluation for the agent graph."""
 
 import json
-import re
 from dataclasses import dataclass
 
+from src.services.agent.structured_output import ScoreOutputError, parse_score_object
 from src.services.llm import ChatMessage, LLMProvider
 
 GUARDRAIL_TEMPERATURE = 0.0
 GUARDRAIL_MAX_TOKENS = 32
-_FENCED_JSON = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL)
 
 
 class GuardrailEvaluationError(Exception):
@@ -73,19 +72,7 @@ class GuardrailEvaluator:
 
     @staticmethod
     def _parse_score(content: str) -> int:
-        if not isinstance(content, str) or not content.strip():
-            raise GuardrailEvaluationError("guardrail response was empty")
-        candidate = content.strip()
-        fenced = _FENCED_JSON.match(candidate)
-        if fenced:
-            candidate = fenced.group(1)
         try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            raise GuardrailEvaluationError("guardrail response was not valid JSON") from exc
-        if not isinstance(payload, dict) or set(payload) != {"score"}:
-            raise GuardrailEvaluationError("guardrail response must contain only score")
-        score = payload["score"]
-        if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
-            raise GuardrailEvaluationError("guardrail score must be an integer between 0 and 100")
-        return score
+            return parse_score_object(content)
+        except ScoreOutputError as exc:
+            raise GuardrailEvaluationError(f"guardrail {exc}") from exc

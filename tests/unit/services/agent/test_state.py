@@ -43,9 +43,12 @@ def test_initial_state_rejects_blank_question(question: str) -> None:
 
 
 def test_evidence_grade_is_content_free_and_validated() -> None:
-    grade = EvidenceGrade(score=75, source_count=3, grader_version="v1")
+    grade = EvidenceGrade(score=75, sufficient=True, source_count=3, grader_version="v1")
 
     assert grade.score == 75
+    assert grade.sufficient is True
     assert grade.source_count == 3
     with pytest.raises(ValueError, match="between 0 and 100"):
-        EvidenceGrade(score=101, source_count=3)
+        EvidenceGrade(score=101, sufficient=True, source_count=3)
+    with pytest.raises(ValueError, match="must be a boolean"):
+        EvidenceGrade(score=75, sufficient=1, source_count=3)  # type: ignore[arg-type]

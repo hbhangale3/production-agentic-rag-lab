@@ -26,6 +26,7 @@ def test_execution_event_has_deterministic_representation() -> None:
             "guardrail_passed": None,
             "guardrail_score": None,
             "evidence_sufficient": None,
+            "evidence_score": None,
             "grounding_passed": None,
         },
     }
@@ -53,3 +54,16 @@ def test_terminal_reasons_distinguish_domain_outcomes_and_failures() -> None:
     assert TerminalReason.GENERATION_FAILED.value == "generation_failed"
     assert TerminalReason.INSUFFICIENT_EVIDENCE is not TerminalReason.GENERATION_FAILED
     assert AgentErrorCategory.GENERATION_FAILURE.value == "generation_failure"
+
+
+@pytest.mark.parametrize("score", [-1, 101])
+def test_evidence_score_metadata_is_bounded(score: int) -> None:
+    assert AgentExecutionMetadata(evidence_score=0).evidence_score == 0
+    assert AgentExecutionMetadata(evidence_score=100).evidence_score == 100
+    with pytest.raises(ValidationError):
+        AgentExecutionMetadata(evidence_score=score)
+
+
+def test_evidence_grading_failure_is_a_distinct_error_category() -> None:
+    assert AgentErrorCategory.EVIDENCE_GRADING_FAILURE.value == "evidence_grading_failure"
+    assert AgentErrorCategory.EVIDENCE_GRADING_FAILURE is not AgentErrorCategory.EVIDENCE_FAILURE
