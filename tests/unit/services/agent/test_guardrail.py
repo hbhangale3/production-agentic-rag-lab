@@ -35,7 +35,7 @@ async def test_in_scope_questions_pass(question: str, score: int) -> None:
     assert result.score == score
     assert result.passed is True
     messages, kwargs = provider.calls[0]
-    assert kwargs == {"temperature": 0.0, "max_tokens": 32}
+    assert kwargs == {"temperature": 0.0, "max_tokens": 1024}
     assert question not in messages[0].content
 
 

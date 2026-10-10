@@ -5,14 +5,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from src.services.agent.live_search import LiveArxivPaper, normalize_arxiv_id
-from src.services.agent.structured_output import StructuredOutputError, parse_string_list_object
+from src.services.agent.structured_output import (
+    CLASSIFIER_MAX_TOKENS,
+    StructuredOutputError,
+    parse_string_list_object,
+)
 from src.services.llm import ChatMessage, LLMProvider
 from src.services.observability.base import Observation
 from src.services.observability.generation import LLMTelemetry, observed_completion
 from src.services.prompts.base import PromptDefinition, PromptIdentity, ResolvedPrompt, local_prompt
 
 LIVE_SELECTION_TEMPERATURE = 0.0
-LIVE_SELECTION_MAX_TOKENS = 128
+LIVE_SELECTION_MAX_TOKENS = CLASSIFIER_MAX_TOKENS
 MAX_SELECTION_ABSTRACT_CHARACTERS = 2000
 SELECTION_FIELD = "selected_arxiv_ids"
 

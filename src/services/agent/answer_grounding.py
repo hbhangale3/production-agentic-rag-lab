@@ -4,7 +4,11 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from src.services.agent.structured_output import ScoreOutputError, parse_score_object
+from src.services.agent.structured_output import (
+    CLASSIFIER_MAX_TOKENS,
+    ScoreOutputError,
+    parse_score_object,
+)
 from src.services.evidence import EvidenceSource
 from src.services.llm import ChatMessage, LLMProvider
 from src.services.observability.base import Observation
@@ -12,7 +16,7 @@ from src.services.observability.generation import LLMTelemetry, observed_complet
 from src.services.prompts.base import PromptDefinition, PromptIdentity, ResolvedPrompt, local_prompt
 
 ANSWER_GROUNDING_TEMPERATURE = 0.0
-ANSWER_GROUNDING_MAX_TOKENS = 32
+ANSWER_GROUNDING_MAX_TOKENS = CLASSIFIER_MAX_TOKENS
 ANSWER_GROUNDING_GRADER_VERSION = "local-v1"
 
 

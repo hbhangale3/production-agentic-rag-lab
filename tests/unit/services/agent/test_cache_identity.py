@@ -16,7 +16,9 @@ from src.services.agent import (
 )
 from src.services.agent.cache_identity import normalize_cache_question
 from src.services.cache.rag_contract import RAG_CACHE_NAMESPACE, RAGCacheIdentityFactory, RAGCacheKeyBuilder
+from src.services.evidence import EvidenceContextBuilder
 from src.services.prompts import PromptIdentity
+from src.services.rag.service import LENGTH_RECOVERY_BUDGET_MULTIPLIER, RAGGenerationService
 
 QUESTION = "PRIVATE_QUESTION_SENTINEL What are the current healthcare issues in India?"
 CORPUS = "a" * 64
@@ -79,6 +81,7 @@ def test_known_vector_for_a_fixed_identity() -> None:
         model="test-model",
         temperature=0.1,
         max_completion_tokens=1024,
+        length_recovery_max_tokens=4096,
         guardrail_threshold=60,
         evidence_sufficiency_threshold=60,
         max_local_retrieval_attempts=2,
@@ -95,7 +98,7 @@ def test_known_vector_for_a_fixed_identity() -> None:
     assert AgentCacheKeyBuilder.build(identity) == KNOWN_VECTOR_KEY
 
 
-KNOWN_VECTOR_KEY = "rag:agent-response:v1:e2b84608f817ba4a787d56799ab7b6e6a6153fb7fe88c37f54d082d48b3b7173"
+KNOWN_VECTOR_KEY = "rag:agent-response:v1:67a4d6e1c1d13f63e523a102821cc5ffb3249021ac995e05b2075697f9d24eaa"
 
 
 def test_same_identity_gives_the_same_key_and_whitespace_does_not_matter() -> None:
@@ -141,6 +144,7 @@ def test_agent_namespace_is_distinct_from_the_week6_rag_cache() -> None:
         {"groq_model": "other-model"},
         {"llm_temperature": 0.2},
         {"llm_max_completion_tokens": 512},
+        {"llm_length_recovery_max_tokens": 2048},
     ],
 )
 def test_answer_affecting_settings_change_the_key(change: dict) -> None:
@@ -248,3 +252,44 @@ def test_identity_is_immutable_and_strictly_validated() -> None:
         AgentCacheKeyBuilder.build("not an identity")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         AgentCacheIdentityFactory(settings=settings()).create(question="   ", corpus_fingerprint=CORPUS, prompts=PROMPTS)
+
+
+def test_length_recovery_configuration_is_in_the_canonical_identity_payload() -> None:
+    identity = AgentCacheIdentityFactory(settings=settings(llm_length_recovery_max_tokens=3000)).create(
+        question=QUESTION, corpus_fingerprint=CORPUS, prompts=PROMPTS
+    )
+    payload = json.loads(AgentCacheKeyBuilder.canonical_payload(identity))
+
+    assert (payload["length_recovery_max_tokens"], payload["length_recovery_multiplier"]) == (3000, 2)
+
+
+def test_only_the_length_recovery_cap_changing_changes_the_key_deterministically() -> None:
+    assert build_key(llm_length_recovery_max_tokens=3000) == build_key(llm_length_recovery_max_tokens=3000)
+    assert build_key(llm_length_recovery_max_tokens=3000) != build_key()
+    assert build_key(llm_length_recovery_max_tokens=4096) == build_key()
+    assert "PRIVATE_QUESTION_SENTINEL" not in build_key(llm_length_recovery_max_tokens=3000)
+    assert build_key(llm_length_recovery_max_tokens=3000).startswith("rag:agent-response:v1:")
+
+
+def test_length_recovery_multiplier_change_changes_the_key() -> None:
+    identity = AgentCacheIdentityFactory(settings=settings()).create(
+        question=QUESTION, corpus_fingerprint=CORPUS, prompts=PROMPTS
+    )
+    changed = identity.model_copy(update={"length_recovery_multiplier": 3})
+
+    assert AgentCacheKeyBuilder.build(changed) != AgentCacheKeyBuilder.build(identity)
+
+
+def test_identity_and_generation_recovery_policy_read_the_same_setting() -> None:
+    configured = settings(llm_length_recovery_max_tokens=3000)
+    identity = AgentCacheIdentityFactory(settings=configured).create(
+        question=QUESTION, corpus_fingerprint=CORPUS, prompts=PROMPTS
+    )
+    generation = RAGGenerationService.from_settings(
+        llm_provider=object(),
+        evidence_builder=EvidenceContextBuilder.from_settings(configured),
+        settings=configured,
+    )
+
+    assert identity.length_recovery_max_tokens == generation.length_recovery_max_tokens == 3000
+    assert identity.length_recovery_multiplier == LENGTH_RECOVERY_BUDGET_MULTIPLIER

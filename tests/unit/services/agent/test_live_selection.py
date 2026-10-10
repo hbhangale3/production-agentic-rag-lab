@@ -68,7 +68,7 @@ async def test_valid_selection_makes_one_bounded_call_and_returns_candidate_obje
     assert selection.papers == (CANDIDATES[2], CANDIDATES[0])
     assert selection.count == 2
     assert len(provider.calls) == 1
-    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 128}
+    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 1024}
 
 
 @pytest.mark.anyio

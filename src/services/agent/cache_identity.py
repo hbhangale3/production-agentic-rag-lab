@@ -14,6 +14,7 @@ from src.config import Settings
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.prompt_identity import AgentPromptIdentityBundle
 from src.services.cache.rag_contract import RAG_EVIDENCE_VERSION, RAG_GROUNDING_VERSION, RAG_RETRIEVAL_VERSION
+from src.services.rag.service import LENGTH_RECOVERY_BUDGET_MULTIPLIER
 
 AGENT_PIPELINE_VERSION = "v1"
 AGENT_CACHE_SCHEMA_VERSION = "v1"
@@ -64,6 +65,9 @@ class AgentCacheIdentity(BaseModel):
     model: str
     temperature: float = Field(ge=0, le=2)
     max_completion_tokens: int = Field(gt=0)
+    # Length recovery decides whether a cut-off answer can be redone, so it affects the outcome.
+    length_recovery_max_tokens: int = Field(gt=0)
+    length_recovery_multiplier: int = Field(default=LENGTH_RECOVERY_BUDGET_MULTIPLIER, gt=0)
     structural_grounding_version: str = RAG_GROUNDING_VERSION
 
     guardrail_threshold: int = Field(ge=0, le=100)
@@ -139,6 +143,8 @@ class AgentCacheIdentityFactory:
             model=settings.groq_model,
             temperature=settings.llm_temperature,
             max_completion_tokens=settings.llm_max_completion_tokens,
+            # The same setting RAGGenerationService.from_settings reads for the recovery policy.
+            length_recovery_max_tokens=settings.llm_length_recovery_max_tokens,
             guardrail_threshold=config.guardrail_threshold,
             evidence_sufficiency_threshold=config.evidence_sufficiency_threshold,
             max_local_retrieval_attempts=config.max_local_retrieval_attempts,

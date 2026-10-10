@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.interfaces.base import BaseDatabase
+from src.services.agent.service import AgentService
 from src.services.cache import RAGResponseCacheCoordinator
 from src.services.observability import ObservabilityProvider
 from src.services.opensearch.factory import make_opensearch_client
@@ -75,6 +76,17 @@ def get_rag_generation_service(request: Request) -> RAGGenerationService:
     return service
 
 
+def get_agent_service(request: Request) -> AgentService:
+    """Return the worker-scoped agent service or a safe configuration failure."""
+    service = getattr(request.app.state, "agent_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Language model service is not configured.",
+        )
+    return service
+
+
 def get_rag_response_cache(request: Request) -> RAGResponseCacheCoordinator:
     """Return the worker-scoped exact-response cache coordinator."""
     return request.app.state.rag_response_cache
@@ -95,5 +107,6 @@ OpenSearchServiceDep = Annotated[object, Depends(get_opensearch_service)]
 PaperSearchServiceDep = Annotated[PaperSearchService, Depends(get_paper_search_service)]
 HybridSearchServiceDep = Annotated[HybridSearchService, Depends(get_hybrid_search_service)]
 RAGGenerationServiceDep = Annotated[RAGGenerationService, Depends(get_rag_generation_service)]
+AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 RAGResponseCacheDep = Annotated[RAGResponseCacheCoordinator, Depends(get_rag_response_cache)]
 ObservabilityDep = Annotated[ObservabilityProvider, Depends(get_observability_provider)]

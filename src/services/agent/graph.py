@@ -1,13 +1,14 @@
 """LangGraph topology: guardrail, retrieval and rewrite, grading, live fallback, rerank, generation, grounding."""
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from src.exceptions import InsufficientEvidenceError
+from src.exceptions import GroundingValidationError, IncompleteGenerationError, InsufficientEvidenceError
 from src.services.agent.answer_grounding import AnswerGroundingGrader, AnswerGroundingPromptBuilder
 from src.services.agent.config import AgentGraphConfig
 from src.services.agent.events import AgentExecutionEvent, AgentExecutionMetadata, AgentExecutionStatus
@@ -44,6 +45,16 @@ from src.services.observability.safe import SafeObservation
 from src.services.rag.prompt import RAGPromptBuilder
 from src.services.rag.service import RAGGenerationService
 from src.services.search.hybrid_service import HybridSearchService
+
+logger = logging.getLogger(__name__)
+
+
+def _log_failure(stage: str, exc: BaseException) -> None:
+    """Record which stage failed and the exception types only; never a message, prompt, or content."""
+
+    cause = type(exc.__cause__).__name__ if exc.__cause__ is not None else None
+    logger.warning("Agent %s failed (%s, cause=%s)", stage, type(exc).__name__, cause)
+
 
 # Pass a request observation as ``config={"configurable": {AGENT_OBSERVATION_KEY: observation}}``.
 AGENT_OBSERVATION_KEY = "observation"
@@ -107,7 +118,8 @@ def _make_guardrail_node(evaluator: GuardrailEvaluator, graph_config: AgentGraph
                 threshold=graph_config.guardrail_threshold,
                 observation=_observation(config),
             )
-        except GuardrailEvaluationError:
+        except GuardrailEvaluationError as exc:
+            _log_failure("guardrail", exc)
             return {
                 "execution_events": [
                     started,
@@ -175,7 +187,8 @@ def _make_local_retrieval_node(service: HybridSearchService, config: AgentGraphC
                 state["current_query"],
                 size=config.retrieval_size,
             )
-        except Exception:
+        except Exception as exc:
+            _log_failure("local retrieval", exc)
             return {
                 "retrieval_attempts": attempt,
                 "local_retrieval_result": None,
@@ -231,7 +244,8 @@ def _make_evidence_grading_node(
 
         try:
             context = context_builder.build(state["local_retrieval_result"])
-        except Exception:
+        except Exception as exc:
+            _log_failure("evidence context build", exc)
             return failed(
                 AgentExecutionEvent(
                     status=AgentExecutionStatus.EVIDENCE_GRADING_STARTED,
@@ -253,7 +267,8 @@ def _make_evidence_grading_node(
                 observation=_observation(config),
                 observation_metadata={"retrieval_attempt": attempt},
             )
-        except EvidenceGradingError:
+        except EvidenceGradingError as exc:
+            _log_failure("evidence grading", exc)
             return failed(started)
         status = (
             AgentExecutionStatus.EVIDENCE_SUFFICIENT if grade.sufficient else AgentExecutionStatus.EVIDENCE_INSUFFICIENT
@@ -309,7 +324,8 @@ def _make_query_rewrite_node(rewriter: QueryRewriter):
                 observation=_observation(config),
                 observation_metadata={"retrieval_attempt": attempt},
             )
-        except QueryRewriteError:
+        except QueryRewriteError as exc:
+            _log_failure("query rewrite", exc)
             return {
                 "execution_events": [
                     started,
@@ -361,7 +377,8 @@ def _make_live_search_node(service: LiveResearchSearchService, config: AgentGrap
             )
             if result.count > max_results:
                 result = LiveArxivSearchResult(query=result.query, candidates=result.candidates[:max_results])
-        except Exception:
+        except Exception as exc:
+            _log_failure("live search", exc)
             return {
                 "live_fallback_used": True,
                 "live_search_result": None,
@@ -414,7 +431,8 @@ def _make_live_selection_node(selector: LivePaperSelector, graph_config: AgentGr
                 max_papers=graph_config.live_pdf_max_papers,
                 observation=_observation(config),
             )
-        except LiveSelectionError:
+        except LiveSelectionError as exc:
+            _log_failure("live paper selection", exc)
             return {
                 "terminal_reason": TerminalReason.INTERNAL_ERROR,
                 "error_category": AgentErrorCategory.LIVE_SELECTION_FAILURE,
@@ -472,7 +490,8 @@ def _make_live_document_node(processor: LiveDocumentProcessor, config: AgentGrap
                 question=state["original_question"],
                 max_chunks_per_paper=config.live_max_chunks_per_paper,
             )
-        except Exception:
+        except Exception as exc:
+            _log_failure("live document processing", exc)
             return failed()
         # Enforce the bounds here too: only selected papers, and a capped number of chunks from each.
         kept_per_paper = {paper.arxiv_id: 0 for paper in papers}
@@ -532,7 +551,8 @@ def _make_evidence_rerank_node(selector: FinalEvidenceSelector, config: AgentGra
                 merged,
                 max_sources=config.final_evidence_max_sources,
             )
-        except Exception:
+        except Exception as exc:
+            _log_failure("evidence rerank", exc)
             return {
                 "terminal_reason": TerminalReason.INTERNAL_ERROR,
                 "error_category": AgentErrorCategory.EVIDENCE_RERANK_FAILURE,
@@ -575,6 +595,22 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
             sequence=sequence,
             metadata=AgentExecutionMetadata(generation_attempt=attempt, final_source_count=len(final)),
         )
+        events = [started]
+
+        def failed(stage: str, exc: BaseException, category: AgentErrorCategory) -> dict[str, Any]:
+            _log_failure(stage, exc)
+            # A rejected, partial, or earlier answer must not remain looking like the current one.
+            return {
+                "generation_result": None,
+                "generated_answer": None,
+                "terminal_reason": TerminalReason.GENERATION_FAILED,
+                "error_category": category,
+                "execution_events": [
+                    *events,
+                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + len(events)),
+                ],
+            }
+
         try:
             evidence = context_builder.build_from_sources(
                 to_evidence_inputs(final),
@@ -582,28 +618,43 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
                 retrieval_mode=local_result.retrieval_mode,
                 degradation_reason=local_result.degradation_reason,
             )
-            result = await service.generate_from_context(
-                question=state["original_question"],
-                evidence=evidence,
-                previous_answer=previous_answer,
-                observation=_observation(config),
-                generation_attempt=attempt,
-            )
+
+            async def generate(*, length_recovery: bool):
+                return await service.generate_from_context(
+                    question=state["original_question"],
+                    evidence=evidence,
+                    previous_answer=previous_answer,
+                    observation=_observation(config),
+                    generation_attempt=attempt,
+                    reject_incomplete=True,
+                    length_recovery=length_recovery,
+                )
+
+            try:
+                result = await generate(length_recovery=False)
+            except IncompleteGenerationError:
+                # The provider stopped at the token limit. Redo this one generation from scratch, once,
+                # with the larger bounded allowance: same question, evidence, and labels; the partial
+                # text is discarded. This is not a grounding attempt.
+                events.append(
+                    AgentExecutionEvent(
+                        status=AgentExecutionStatus.GENERATION_LENGTH_RECOVERY_STARTED,
+                        sequence=sequence + 1,
+                        metadata=AgentExecutionMetadata(generation_attempt=attempt),
+                    )
+                )
+                result = await generate(length_recovery=True)
         except InsufficientEvidenceError:
             # Nothing fit the context budget: there is no evidence to answer from, which is not a failure.
             return {"execution_events": [started]}
-        except Exception:
-            # A rejected earlier answer must not remain looking like the current one.
-            return {
-                "generation_result": None,
-                "generated_answer": None,
-                "terminal_reason": TerminalReason.GENERATION_FAILED,
-                "error_category": AgentErrorCategory.GENERATION_FAILURE,
-                "execution_events": [
-                    started,
-                    AgentExecutionEvent(status=AgentExecutionStatus.GRAPH_FAILED, sequence=sequence + 1),
-                ],
-            }
+        except IncompleteGenerationError as exc:
+            # Still cut off after the one recovery (or no larger allowance fits): no further attempt.
+            return failed("answer generation (incomplete)", exc, AgentErrorCategory.GENERATION_INCOMPLETE)
+        except GroundingValidationError as exc:
+            # Structural citation failure: a generation failure, distinct from semantic grounding.
+            return failed("answer citation validation", exc, AgentErrorCategory.ANSWER_VALIDATION_FAILURE)
+        except Exception as exc:
+            return failed("answer generation", exc, AgentErrorCategory.GENERATION_FAILURE)
         # The previous grounding decision described the previous answer.
         return {
             "generation_result": result,
@@ -611,10 +662,10 @@ def _make_generation_node(service: RAGGenerationService, context_builder: Eviden
             "grounding_passed": None,
             "grounding_result": None,
             "execution_events": [
-                started,
+                *events,
                 AgentExecutionEvent(
                     status=AgentExecutionStatus.GENERATION_COMPLETED,
-                    sequence=sequence + 1,
+                    sequence=sequence + len(events),
                     metadata=AgentExecutionMetadata(
                         generation_attempt=attempt,
                         final_source_count=len(result.sources),
@@ -663,7 +714,8 @@ def _make_answer_grounding_node(grader: AnswerGroundingGrader, graph_config: Age
                 observation=_observation(config),
                 observation_metadata={"grounding_attempt": attempt},
             )
-        except Exception:
+        except Exception as exc:
+            _log_failure("answer grounding", exc)
             return {
                 "grounding_attempts": attempt,
                 "terminal_reason": TerminalReason.INTERNAL_ERROR,

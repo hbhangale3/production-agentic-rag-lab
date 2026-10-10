@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from src.exceptions import ArxivPDFDownloadError, PDFNoTextError, PDFParserError
+from src.exceptions import ArxivPDFDownloadError, IncompleteGenerationError, PDFNoTextError, PDFParserError
 from src.schemas.hybrid_search import HybridSearchHit, HybridSearchResult
 from src.schemas.parsed_pdf import ParsedPDF
 from src.services.agent import (
@@ -99,6 +99,14 @@ REGENERATED_ANSWER = "Private regenerated synthesis [S1]."
 GROUNDING_SYSTEM_PROMPT = AnswerGroundingPromptBuilder.SYSTEM_PROMPT
 
 
+class Truncated(str):
+    """A scripted answer the provider reports as cut off at the completion-token limit."""
+
+
+class Stopped(str):
+    """A scripted answer the provider reports as normally finished."""
+
+
 class FakeLLMProvider:
     """Scripted classifier completions in call order (guardrail, grader, rewrite, grader, selection).
 
@@ -122,10 +130,10 @@ class FakeLLMProvider:
 
     async def complete(self, messages, **kwargs):
         system = messages[0].content
-        if system == RAG_SYSTEM_PROMPT:
+        if system.startswith(RAG_SYSTEM_PROMPT):
             response = self.answers[min(len(self.generation_calls), len(self.answers) - 1)]
             self.generation_calls.append((messages, kwargs))
-        elif system == GROUNDING_SYSTEM_PROMPT:
+        elif system.startswith(GROUNDING_SYSTEM_PROMPT):
             response = self.groundings[min(len(self.grounding_calls), len(self.groundings) - 1)]
             self.grounding_calls.append((messages, kwargs))
         else:
@@ -133,7 +141,14 @@ class FakeLLMProvider:
             self.calls.append((messages, kwargs))
         if isinstance(response, Exception):
             raise response
-        return LLMCompletion(content=response, model="fake-model", prompt_tokens=111, completion_tokens=22)
+        finish_reason = "length" if isinstance(response, Truncated) else "stop" if isinstance(response, Stopped) else None
+        return LLMCompletion(
+            content=response,
+            model="fake-model",
+            prompt_tokens=111,
+            completion_tokens=22,
+            finish_reason=finish_reason,
+        )
 
 
 class FakeEmbeddingProvider:
@@ -419,7 +434,7 @@ async def test_grader_receives_bounded_deterministic_evidence_context() -> None:
     assert grader_user_message.index("[S1]") < grader_user_message.index("[S2]")
     assert "omega " * 400 not in grader_user_message
     assert result["evidence_grade"].source_count == 2
-    assert provider.calls[1][1] == {"temperature": 0.0, "max_tokens": 32}
+    assert provider.calls[1][1] == {"temperature": 0.0, "max_tokens": 1024}
 
 
 @pytest.mark.anyio
@@ -1616,14 +1631,33 @@ async def test_rerank_failure_is_distinct_from_insufficient_evidence(live_path: 
 @pytest.mark.parametrize(
     "answer",
     [
-        RuntimeError("private generation detail"),
         "Private generation detail cites an unknown source [S9].",
         "Private generation detail cites nothing at all.",
         "Private generation detail uses a malformed label [S0].",
         "Private generation detail uses a malformed label [S 1].",
     ],
 )
-async def test_generation_provider_and_structural_validation_failures_are_controlled(answer) -> None:
+async def test_structurally_invalid_answer_is_a_generation_failure_not_a_grounding_failure(answer) -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATION_FAILED_TAIL]
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert S.GROUNDING_STARTED not in statuses(result) and S.GROUNDING_FAILED not in statuses(result)
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 0)
+    assert result["generated_answer"] is None
+    assert result["generation_result"] is None
+    assert (result["grounding_passed"], result["grounding_attempts"]) == (None, 0)
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.ANSWER_VALIDATION_FAILURE
+    serialized = repr({key: value for key, value in result.items() if key != "local_retrieval_result"})
+    assert "rivate generation detail" not in serialized
+
+
+@pytest.mark.anyio
+async def test_generation_provider_failure_is_controlled() -> None:
+    answer = RuntimeError("private generation detail")
     deps, provider, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))
 
     result = await run(deps)
@@ -1690,7 +1724,7 @@ async def test_first_grounding_pass_completes_without_regeneration() -> None:
 
     assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *GROUNDED, S.GRAPH_COMPLETED]
     assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 1)
-    assert provider.grounding_calls[0][1] == {"temperature": 0.0, "max_tokens": 32}
+    assert provider.grounding_calls[0][1] == {"temperature": 0.0, "max_tokens": 1024}
     assert result["grounding_attempts"] == 1
     assert result["grounding_passed"] is True
     assert result["grounding_result"] == AnswerGroundingResult(score=88, passed=True)
@@ -1870,13 +1904,33 @@ async def test_grounding_grader_execution_failure_is_not_a_low_score(grounding) 
 @pytest.mark.parametrize(
     "regenerated",
     [
-        RuntimeError("private regeneration detail"),
         "Private regeneration detail with unknown label [S9].",
         "Private regeneration detail with malformed label [S0].",
         "Private regeneration detail without any citation.",
     ],
 )
-async def test_regeneration_failure_is_generation_failure_without_second_grounding(regenerated) -> None:
+async def test_structurally_invalid_regeneration_is_a_generation_failure(regenerated) -> None:
+    llm = FakeLLMProvider(answer=(ANSWER, regenerated), grounding=(LOW, HIGH))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *UNGROUNDED, S.GENERATION_STARTED, S.GRAPH_FAILED]
+    assert S.GRAPH_COMPLETED not in statuses(result)
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 1)
+    assert (result["grounding_attempts"], result["grounding_passed"]) == (1, False)
+    assert result["generated_answer"] is None
+    assert result["generation_result"] is None
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.ANSWER_VALIDATION_FAILURE
+    serialized = repr({key: value for key, value in result.items() if key != "local_retrieval_result"})
+    assert "rivate regeneration detail" not in serialized
+    assert ANSWER not in serialized
+
+
+@pytest.mark.anyio
+async def test_regeneration_provider_failure_is_generation_failure_without_second_grounding() -> None:
+    regenerated = RuntimeError("private regeneration detail")
     llm = FakeLLMProvider(answer=(ANSWER, regenerated), grounding=(LOW, HIGH))
     deps, provider, _ = dependencies(llm=llm)
 
@@ -2481,3 +2535,255 @@ async def test_events_are_deterministic_and_content_free(responses: tuple[str, .
         "secret rationale",
     ):
         assert forbidden not in serialized
+
+
+# --- Completion finish reason and bounded length recovery ---
+
+PARTIAL = "Private partial synthesis cut off mid sentence [S1] and then"
+PARTIAL_REGENERATION = "Private partial regeneration cut off [S1] and"
+RECOVERED_ANSWER = "Private recovered complete synthesis [S1]."
+RECOVERY = S.GENERATION_LENGTH_RECOVERY_STARTED
+NORMAL_MAX_TOKENS, RECOVERY_MAX_TOKENS = 64, 128
+
+
+def serialized_state(result) -> str:
+    return repr({key: value for key, value in result.items() if key != "local_retrieval_result"})
+
+
+def max_tokens(provider) -> list[int]:
+    return [kwargs["max_tokens"] for _, kwargs in provider.generation_calls]
+
+
+@pytest.mark.anyio
+async def test_normal_stop_finish_reason_follows_the_existing_path() -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(answer=Stopped(ANSWER)))
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *GENERATED, *GROUNDED, S.GRAPH_COMPLETED]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (1, 1)
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS]
+    assert result["generation_result"].finish_reason == "stop"
+    assert (result["generated_answer"], result["grounding_passed"], result["terminal_reason"]) == (ANSWER, True, None)
+
+
+@pytest.mark.anyio
+async def test_missing_finish_reason_keeps_the_existing_behaviour() -> None:
+    deps, provider, _ = dependencies(llm=FakeLLMProvider(answer=ANSWER))
+
+    result = await run(deps)
+
+    assert RECOVERY not in statuses(result)
+    assert len(provider.generation_calls) == 1
+    assert result["generation_result"].finish_reason is None
+    assert (result["generated_answer"], result["grounding_passed"]) == (ANSWER, True)
+
+
+@pytest.mark.anyio
+async def test_length_truncation_is_recovered_once_from_scratch_with_a_larger_budget() -> None:
+    llm = FakeLLMProvider(answer=(Truncated(PARTIAL), Stopped(RECOVERED_ANSWER)))
+    deps, provider, retrieval = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [
+        *LOCAL_SUFFICIENT,
+        *RERANKED,
+        S.GENERATION_STARTED,
+        RECOVERY,
+        S.GENERATION_COMPLETED,
+        *GROUNDED,
+        S.GRAPH_COMPLETED,
+    ]
+    assert [event.sequence for event in result["execution_events"]] == list(range(len(result["execution_events"])))
+    first, second = provider.generation_calls
+    # Same question, evidence, labels, and prompt: nothing of the partial answer is appended or sent back.
+    assert first[0] == second[0]
+    assert PARTIAL not in repr(second[0])
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS, RECOVERY_MAX_TOKENS]
+    # Only the complete answer was ever graded.
+    assert len(provider.grounding_calls) == 1
+    assert RECOVERED_ANSWER in repr(provider.grounding_calls[0][0])
+    assert PARTIAL not in repr(provider.grounding_calls)
+    assert retrieval.search.call_count == 1
+    assert result["generated_answer"] == result["generation_result"].answer == RECOVERED_ANSWER
+    assert result["generation_result"].finish_reason == "stop"
+    assert (result["grounding_attempts"], result["grounding_passed"], result["terminal_reason"]) == (1, True, None)
+    assert PARTIAL not in serialized_state(result)
+
+
+@pytest.mark.anyio
+async def test_length_truncation_twice_is_a_controlled_generation_failure() -> None:
+    llm = FakeLLMProvider(answer=(Truncated(PARTIAL), Truncated(PARTIAL + " more")))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *RERANKED, S.GENERATION_STARTED, RECOVERY, S.GRAPH_FAILED]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 0)
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS, RECOVERY_MAX_TOKENS]
+    assert result["generated_answer"] is None and result["generation_result"] is None
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.GENERATION_INCOMPLETE
+    assert "rivate partial" not in serialized_state(result)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "recovered",
+    ["Private recovery cites nothing at all.", "Private recovery cites an unknown source [S9]."],
+)
+async def test_length_recovery_with_an_invalid_citation_contract_is_a_generation_failure(recovered) -> None:
+    llm = FakeLLMProvider(answer=(Truncated(PARTIAL), Stopped(recovered)))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [*LOCAL_SUFFICIENT, *RERANKED, S.GENERATION_STARTED, RECOVERY, S.GRAPH_FAILED]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 0)
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.ANSWER_VALIDATION_FAILURE
+    assert result["grounding_passed"] is None
+    assert "rivate partial" not in serialized_state(result)
+    assert "rivate recovery" not in serialized_state(result)
+
+
+@pytest.mark.anyio
+async def test_truncated_text_with_a_broken_citation_is_recovered_not_structurally_rejected() -> None:
+    # A cut-off answer is never structurally validated: it is redone, not failed for its citations.
+    llm = FakeLLMProvider(answer=(Truncated("Private partial text cut inside a label [S"), Stopped(RECOVERED_ANSWER)))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert (result["generated_answer"], result["grounding_passed"], result["error_category"]) == (
+        RECOVERED_ANSWER,
+        True,
+        None,
+    )
+    assert len(provider.generation_calls) == 2
+
+
+@pytest.mark.anyio
+async def test_grounding_regeneration_is_unchanged_by_finish_reasons() -> None:
+    llm = FakeLLMProvider(answer=(Stopped(ANSWER), Stopped(REGENERATED_ANSWER)), grounding=(LOW, HIGH))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [
+        *LOCAL_SUFFICIENT,
+        *GENERATED,
+        *UNGROUNDED,
+        S.GENERATION_STARTED,
+        S.GENERATION_COMPLETED,
+        *GROUNDED,
+        S.GRAPH_COMPLETED,
+    ]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (2, 2)
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS, NORMAL_MAX_TOKENS]
+    assert (result["generated_answer"], result["grounding_attempts"], result["grounding_passed"]) == (
+        REGENERATED_ANSWER,
+        2,
+        True,
+    )
+
+
+@pytest.mark.anyio
+async def test_truncated_grounding_regeneration_gets_its_own_single_length_recovery() -> None:
+    llm = FakeLLMProvider(
+        answer=(Stopped(ANSWER), Truncated(PARTIAL_REGENERATION), Stopped(RECOVERED_ANSWER)),
+        grounding=(LOW, HIGH),
+    )
+    deps, provider, retrieval = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [
+        *LOCAL_SUFFICIENT,
+        *GENERATED,
+        *UNGROUNDED,
+        S.GENERATION_STARTED,
+        RECOVERY,
+        S.GENERATION_COMPLETED,
+        *GROUNDED,
+        S.GRAPH_COMPLETED,
+    ]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (3, 2)
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS, NORMAL_MAX_TOKENS, RECOVERY_MAX_TOKENS]
+    # The recovery repeats the regeneration request itself; the partial regeneration is not reused.
+    assert provider.generation_calls[1][0] == provider.generation_calls[2][0]
+    assert PARTIAL_REGENERATION not in repr(provider.generation_calls[2][0])
+    assert PARTIAL_REGENERATION not in repr(provider.grounding_calls)
+    # Length recovery is not a grounding attempt.
+    assert (result["grounding_attempts"], result["grounding_passed"]) == (2, True)
+    assert result["generated_answer"] == RECOVERED_ANSWER
+    assert retrieval.search.call_count == 1
+    serialized = serialized_state(result)
+    assert PARTIAL_REGENERATION not in serialized and ANSWER not in serialized
+
+
+@pytest.mark.anyio
+async def test_truncated_grounding_regeneration_truncated_again_is_a_generation_failure() -> None:
+    llm = FakeLLMProvider(
+        answer=(Stopped(ANSWER), Truncated(PARTIAL_REGENERATION), Truncated(PARTIAL_REGENERATION + " more")),
+        grounding=(LOW, HIGH),
+    )
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert statuses(result) == [
+        *LOCAL_SUFFICIENT,
+        *GENERATED,
+        *UNGROUNDED,
+        S.GENERATION_STARTED,
+        RECOVERY,
+        S.GRAPH_FAILED,
+    ]
+    assert (len(provider.generation_calls), len(provider.grounding_calls)) == (3, 1)
+    assert result["grounding_attempts"] == 1
+    assert result["generated_answer"] is None and result["generation_result"] is None
+    assert result["terminal_reason"] == TerminalReason.GENERATION_FAILED
+    assert result["error_category"] == AgentErrorCategory.GENERATION_INCOMPLETE
+    serialized = serialized_state(result)
+    assert "rivate partial" not in serialized and ANSWER not in serialized
+
+
+@pytest.mark.anyio
+async def test_structural_and_semantic_failures_stay_distinct_in_state() -> None:
+    structural_deps, _, _ = dependencies(llm=FakeLLMProvider(answer=Stopped("Private answer without a citation.")))
+    semantic_deps, _, _ = dependencies(
+        llm=FakeLLMProvider(answer=(Stopped(ANSWER), Stopped(REGENERATED_ANSWER)), grounding=LOW)
+    )
+
+    structural, semantic = await run(structural_deps), await run(semantic_deps)
+
+    assert (structural["terminal_reason"], structural["error_category"]) == (
+        TerminalReason.GENERATION_FAILED,
+        AgentErrorCategory.ANSWER_VALIDATION_FAILURE,
+    )
+    assert (semantic["terminal_reason"], semantic["error_category"]) == (TerminalReason.GROUNDING_FAILED, None)
+    assert (structural["grounding_attempts"], semantic["grounding_attempts"]) == (0, 2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("recovery", "answer", "category"),
+    [
+        (Stopped(RECOVERED_ANSWER), RECOVERED_ANSWER, None),
+        (IncompleteGenerationError("private provider detail"), None, AgentErrorCategory.GENERATION_INCOMPLETE),
+    ],
+)
+async def test_provider_reported_empty_truncation_gets_the_same_single_recovery(recovery, answer, category) -> None:
+    # A reasoning model can hit the limit before writing any text; the adapter reports that as incomplete.
+    llm = FakeLLMProvider(answer=(IncompleteGenerationError("private provider detail"), recovery))
+    deps, provider, _ = dependencies(llm=llm)
+
+    result = await run(deps)
+
+    assert RECOVERY in statuses(result)
+    assert max_tokens(provider) == [NORMAL_MAX_TOKENS, RECOVERY_MAX_TOKENS]
+    assert (result["generated_answer"], result["error_category"]) == (answer, category)
+    assert len(provider.grounding_calls) == (1 if answer else 0)
+    assert "private provider detail" not in serialized_state(result)

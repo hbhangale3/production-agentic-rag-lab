@@ -3,14 +3,18 @@
 import json
 from dataclasses import dataclass
 
-from src.services.agent.structured_output import ScoreOutputError, parse_score_object
+from src.services.agent.structured_output import (
+    CLASSIFIER_MAX_TOKENS,
+    ScoreOutputError,
+    parse_score_object,
+)
 from src.services.llm import ChatMessage, LLMProvider
 from src.services.observability.base import Observation
 from src.services.observability.generation import LLMTelemetry, observed_completion
 from src.services.prompts.base import PromptDefinition, PromptIdentity, ResolvedPrompt, local_prompt
 
 GUARDRAIL_TEMPERATURE = 0.0
-GUARDRAIL_MAX_TOKENS = 32
+GUARDRAIL_MAX_TOKENS = CLASSIFIER_MAX_TOKENS
 
 
 class GuardrailEvaluationError(Exception):

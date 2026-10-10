@@ -66,6 +66,10 @@ class GroundingValidationError(LLMResponseError):
     """Exception raised when a generated answer violates the grounding contract."""
 
 
+class IncompleteGenerationError(LLMResponseError):
+    """The provider stopped at the completion-token limit; the text is partial and must not be used."""
+
+
 class RAGException(Exception):
     """Base exception for grounded generation failures outside the provider."""
 

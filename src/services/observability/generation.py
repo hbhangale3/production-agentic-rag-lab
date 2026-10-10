@@ -47,6 +47,7 @@ def finish_generation_observation(
     model: str | None,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    finish_reason: str | None = None,
 ) -> None:
     """Record provider-reported usage, measured latency, and cost only when rates are configured."""
 
@@ -71,6 +72,8 @@ def finish_generation_observation(
     }
     if cost is not None:
         metadata["cost_usd"] = cost.total_cost
+    if finish_reason is not None:
+        metadata["finish_reason"] = finish_reason
     generation.update(metadata=metadata)
     generation.end()
 
@@ -128,5 +131,6 @@ async def observed_completion(
         model=getattr(completion, "model", None),
         prompt_tokens=getattr(completion, "prompt_tokens", None),
         completion_tokens=getattr(completion, "completion_tokens", None),
+        finish_reason=getattr(completion, "finish_reason", None),
     )
     return completion

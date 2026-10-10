@@ -3,7 +3,11 @@
 import json
 
 from src.services.agent.state import EvidenceGrade
-from src.services.agent.structured_output import ScoreOutputError, parse_score_object
+from src.services.agent.structured_output import (
+    CLASSIFIER_MAX_TOKENS,
+    ScoreOutputError,
+    parse_score_object,
+)
 from src.services.evidence import EvidenceContext
 from src.services.llm import ChatMessage, LLMProvider
 from src.services.observability.base import Observation
@@ -11,7 +15,7 @@ from src.services.observability.generation import LLMTelemetry, observed_complet
 from src.services.prompts.base import PromptDefinition, PromptIdentity, ResolvedPrompt, local_prompt
 
 EVIDENCE_GRADER_TEMPERATURE = 0.0
-EVIDENCE_GRADER_MAX_TOKENS = 32
+EVIDENCE_GRADER_MAX_TOKENS = CLASSIFIER_MAX_TOKENS
 
 
 class EvidenceGradingError(Exception):

@@ -3,6 +3,10 @@
 import json
 import re
 
+# Upper bound on completion tokens for the agent's small JSON outputs. Reasoning models spend
+# completion tokens before emitting any content, so a tight cap returns an empty completion.
+CLASSIFIER_MAX_TOKENS = 1024
+
 _FENCED_JSON = re.compile(r"\A```(?:json)?\s*(.*?)\s*```\Z", re.DOTALL)
 
 

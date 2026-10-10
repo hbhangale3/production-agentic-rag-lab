@@ -5,6 +5,7 @@ import pytest
 from src.config import Settings
 from src.exceptions import (
     GroundingValidationError,
+    IncompleteGenerationError,
     InsufficientEvidenceError,
     LLMConfigurationError,
     LLMRequestError,
@@ -815,3 +816,159 @@ def test_with_prompt_builder_returns_an_independent_service_sharing_everything_e
         original.answer_validator,
     )
     assert derived.max_completion_tokens == original.max_completion_tokens
+
+
+def finished(finish_reason: str | None, content: str = "Complete answer [S1].") -> FakeLLMProvider:
+    return FakeLLMProvider(
+        completion=LLMCompletion(
+            content=content, model="fake-model", prompt_tokens=10, completion_tokens=5, finish_reason=finish_reason
+        )
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("finish_reason", ["stop", None, "content_filter"])
+async def test_finish_reason_is_carried_on_the_result_and_only_length_is_incomplete(finish_reason) -> None:
+    provider = finished(finish_reason)
+
+    result = await service(provider).generate_from_context(
+        question="question?", evidence=mixed_context(), reject_incomplete=True
+    )
+
+    assert (result.answer, result.finish_reason) == ("Complete answer [S1].", finish_reason)
+    assert provider.calls[0][2] == 512
+
+
+@pytest.mark.anyio
+async def test_reject_incomplete_raises_before_structural_validation() -> None:
+    # The partial text also breaks the citation contract; it must be reported as incomplete, not invalid.
+    provider = finished("length", content="PRIVATE_PARTIAL cut inside a label [S")
+
+    with pytest.raises(IncompleteGenerationError) as caught:
+        await service(provider).generate_from_context(
+            question="question?", evidence=mixed_context(), reject_incomplete=True
+        )
+
+    assert "PRIVATE_PARTIAL" not in str(caught.value)
+
+
+@pytest.mark.anyio
+async def test_truncation_is_not_rejected_unless_requested_so_existing_callers_are_unchanged() -> None:
+    provider = finished("length", content="Cut off answer [S1] and")
+    generation_service = service(provider)
+
+    from_context = await generation_service.generate_from_context(question="question?", evidence=mixed_context())
+    plain = await generation_service.generate(
+        question="question?", retrieval_result=retrieval(hit("paper::chunk::000", "Evidence text."))
+    )
+
+    assert (from_context.finish_reason, plain.finish_reason) == ("length", "length")
+    assert [call[2] for call in provider.calls] == [512, 512]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("completion_tokens", "cap", "expected"),
+    [
+        (512, None, 1024),  # default cap is twice the normal limit
+        (512, 4096, 1024),  # the multiplier binds
+        (512, 800, 800),  # the absolute cap binds
+    ],
+)
+async def test_length_recovery_uses_a_larger_bounded_allowance_with_identical_messages(
+    completion_tokens, cap, expected
+) -> None:
+    provider = finished("stop")
+    generation_service = service(provider, completion_tokens=completion_tokens)
+    if cap is not None:
+        generation_service.length_recovery_max_tokens = cap
+    evidence = mixed_context()
+
+    await generation_service.generate_from_context(question="question?", evidence=evidence, reject_incomplete=True)
+    recovered = await generation_service.generate_from_context(
+        question="question?", evidence=evidence, reject_incomplete=True, length_recovery=True
+    )
+
+    normal_call, recovery_call = provider.calls
+    assert normal_call[0] == recovery_call[0]
+    assert (normal_call[2], recovery_call[2]) == (completion_tokens, expected)
+    assert recovered.sources == evidence.sources
+
+
+@pytest.mark.anyio
+async def test_length_recovery_allowance_never_exceeds_the_context_window() -> None:
+    provider = finished("stop")
+    generation_service = service(provider, completion_tokens=512, context_window=1200, safety_margin=100)
+    evidence = mixed_context()
+    prompt_tokens = generation_service.prepare_from_context(question="question?", evidence=evidence).estimated_prompt_tokens
+
+    await generation_service.generate_from_context(question="question?", evidence=evidence, length_recovery=True)
+
+    allowance = provider.calls[0][2]
+    assert 512 < allowance == 1200 - 100 - prompt_tokens < 1024
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cap", [512, 100])
+async def test_length_recovery_without_a_larger_allowance_fails_without_calling_the_model(cap) -> None:
+    provider = finished("stop")
+    generation_service = service(provider, completion_tokens=512)
+    generation_service.length_recovery_max_tokens = cap
+
+    with pytest.raises(IncompleteGenerationError):
+        await generation_service.generate_from_context(
+            question="question?", evidence=mixed_context(), length_recovery=True
+        )
+
+    assert provider.calls == []
+
+
+@pytest.mark.anyio
+async def test_length_recovery_generation_is_a_distinguishable_observation_without_content() -> None:
+    root = RecordingObservation()
+    truncated = observed_service(finished("length", content="PRIVATE_PARTIAL [S1] and"))
+    complete = observed_service(finished("stop"))
+    evidence = mixed_context()
+
+    with pytest.raises(IncompleteGenerationError):
+        await truncated.generate_from_context(
+            question="question?", evidence=evidence, observation=root, generation_attempt=1, reject_incomplete=True
+        )
+    await complete.generate_from_context(
+        question="question?",
+        evidence=evidence,
+        observation=root,
+        generation_attempt=1,
+        reject_incomplete=True,
+        length_recovery=True,
+    )
+
+    first, second = [child for child in root.children if child.kind == "generation"]
+    merged_first = {key: value for update in first.metadata for key, value in update.items()}
+    merged_second = {key: value for update in second.metadata for key, value in update.items()}
+    assert (first.name, second.name) == ("rag.generation", "rag.generation")
+    assert (merged_first["finish_reason"], merged_first["max_completion_tokens"]) == ("length", 512)
+    assert "generation_reason" not in merged_first
+    assert (merged_second["generation_reason"], merged_second["finish_reason"]) == ("length_recovery", "stop")
+    assert (merged_second["max_completion_tokens"], merged_second["generation_attempt"]) == (1024, 1)
+    # The same prompt identity: a partial answer never changes the fingerprint.
+    assert merged_first["prompt_fingerprint"] == merged_second["prompt_fingerprint"]
+    assert first.end_count == second.end_count == 1
+    # Only a structural-validation span for the completed answer.
+    assert [child.name for child in root.children].count("rag.grounding") == 1
+    assert "PRIVATE_PARTIAL" not in repr([child.metadata for child in root.children])
+
+
+def test_settings_wire_the_length_recovery_cap() -> None:
+    settings = Settings(_env_file=None, debug=False, llm_length_recovery_max_tokens=1500)
+
+    generation_service = RAGGenerationService.from_settings(
+        llm_provider=FakeLLMProvider(),
+        evidence_builder=EvidenceContextBuilder.from_settings(settings),
+        settings=settings,
+    )
+
+    assert Settings(_env_file=None, debug=False).llm_length_recovery_max_tokens == 4096
+    assert generation_service.length_recovery_max_tokens == 1500
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, debug=False, llm_length_recovery_max_tokens=0)

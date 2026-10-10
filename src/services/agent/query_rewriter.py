@@ -3,14 +3,18 @@
 import json
 from dataclasses import dataclass
 
-from src.services.agent.structured_output import StructuredOutputError, parse_query_object
+from src.services.agent.structured_output import (
+    CLASSIFIER_MAX_TOKENS,
+    StructuredOutputError,
+    parse_query_object,
+)
 from src.services.llm import ChatMessage, LLMProvider
 from src.services.observability.base import Observation
 from src.services.observability.generation import LLMTelemetry, observed_completion
 from src.services.prompts.base import PromptDefinition, PromptIdentity, ResolvedPrompt, local_prompt
 
 QUERY_REWRITE_TEMPERATURE = 0.0
-QUERY_REWRITE_MAX_TOKENS = 128
+QUERY_REWRITE_MAX_TOKENS = CLASSIFIER_MAX_TOKENS
 MAX_REWRITTEN_QUERY_CHARACTERS = 300
 
 

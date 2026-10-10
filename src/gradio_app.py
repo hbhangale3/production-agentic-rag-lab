@@ -6,9 +6,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import gradio as gr
-from src.gradio_client import RAGStreamClient, RAGUIClientError, SSEEvent
+from src.gradio_client import AgentStreamClient, RAGStreamClient, RAGUIClientError, SSEEvent
 
-DEFAULT_API_BASE_URL = "http://127.0.0.1:8001"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+MAX_EXECUTION_STEPS = 60
+SOURCE_TYPE_LABELS = {"local": "LOCAL", "live_arxiv": "LIVE ARXIV"}
+OUTCOME_STATUS = {
+    "out_of_scope": "Out of scope",
+    "insufficient_evidence": "Insufficient evidence",
+    "grounding_failed": "Grounding validation failed",
+    "generation_failed": "No validated answer could be produced",
+}
 EXAMPLE_QUESTIONS = [
     "How can artificial intelligence improve healthcare access for underserved populations?",
     "What kinds of bias can affect large language models used for clinical triage?",
@@ -38,6 +46,9 @@ class DemoState:
     observability_status: str | None = None
     status: str = "Ready"
     terminal: str | None = None
+    steps: list[str] = field(default_factory=list)
+    outcome: str | None = None
+    grounding_passed: bool | None = None
 
     def apply(self, event: SSEEvent) -> None:
         if event.event == "metadata":
@@ -53,6 +64,29 @@ class DemoState:
             self.observability_provider = _optional_text(event.data.get("observability_provider"))
             self.observability_status = _optional_text(event.data.get("observability_status"))
             self.status = "Generating…"
+        elif event.event == "status":
+            message = event.data.get("message")
+            if not isinstance(message, str) or not message:
+                raise RAGUIClientError("RAG API returned an invalid status update.")
+            if len(self.steps) < MAX_EXECUTION_STEPS:
+                self.steps.append(message)
+            self.status = f"{message}…"
+        elif event.event == "answer":
+            # The agent sends the answer once, only after it has passed grounding validation.
+            text = event.data.get("text")
+            if not isinstance(text, str) or not text:
+                raise RAGUIClientError("RAG API returned an invalid answer.")
+            self.answer = text
+            self.outcome = "answered"
+            self.status = "Answer validated"
+        elif event.event == "outcome":
+            outcome, message = event.data.get("outcome"), event.data.get("message")
+            if outcome not in OUTCOME_STATUS or not isinstance(message, str) or not message:
+                raise RAGUIClientError("RAG API returned an invalid outcome.")
+            self.answer = message
+            self.sources = []
+            self.outcome = outcome
+            self.status = OUTCOME_STATUS[outcome]
         elif event.event == "delta":
             text = event.data.get("text")
             if not isinstance(text, str):
@@ -69,21 +103,29 @@ class DemoState:
             self.model = _optional_text(event.data.get("model"))
             self.prompt_tokens = _optional_nonnegative_int(event.data.get("prompt_tokens"))
             self.completion_tokens = _optional_nonnegative_int(event.data.get("completion_tokens"))
-            self.status = "Grounding validation passed"
+            grounding = event.data.get("grounding_passed")
+            self.grounding_passed = grounding if isinstance(grounding, bool) else None
+            self.status = OUTCOME_STATUS.get(self.outcome, "Grounding validation passed")
             self.terminal = "done"
         elif event.event == "error":
             self.sources = []
-            self.status = (
-                "Validation or generation failed. Any partial answer is unvalidated and "
-                "must not be treated as a grounded final answer."
-            )
+            message = event.data.get("message")
+            if self.steps and isinstance(message, str) and message:
+                # Agent errors carry a fixed safe message and never a partial answer.
+                self.answer = ""
+                self.status = message
+            else:
+                self.status = (
+                    "Validation or generation failed. Any partial answer is unvalidated and "
+                    "must not be treated as a grounded final answer."
+                )
             self.terminal = "error"
 
 
 async def stream_demo(
     question: str,
     *,
-    client: RAGStreamClient | None = None,
+    client: RAGStreamClient | AgentStreamClient | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[tuple[str, str, str, str]]:
     state = DemoState()
@@ -92,7 +134,7 @@ async def stream_demo(
         yield _render(state)
         return
 
-    active_client = client or RAGStreamClient(base_url=os.getenv("RAG_API_BASE_URL", DEFAULT_API_BASE_URL))
+    active_client = client or AgentStreamClient(base_url=os.getenv("RAG_API_BASE_URL", DEFAULT_API_BASE_URL))
     started_at = clock()
     state.status = "Connecting to RAG API…"
     yield _render(state)
@@ -118,7 +160,11 @@ def clear_demo() -> tuple[str, str, str, str, str]:
 
 def build_demo() -> gr.Blocks:
     with gr.Blocks(title="Production Agentic RAG") as demo:
-        gr.Markdown("# Production Agentic RAG\nGrounded research-paper question answering over the locally indexed corpus.")
+        gr.Markdown(
+            "# Production Agentic RAG\n"
+            "Grounded research-paper question answering: local hybrid retrieval, evidence grading, "
+            "live arXiv fallback, and semantic answer grounding."
+        )
         question = gr.Textbox(
             label="Research question",
             lines=3,
@@ -146,7 +192,7 @@ def build_demo() -> gr.Blocks:
 
 
 def _render(state: DemoState) -> tuple[str, str, str, str]:
-    answer = state.answer or "_Answer text will appear here as it is generated._"
+    answer = state.answer or "_The answer will appear here once it has been validated._"
     return answer, _render_sources(state.sources), f"**Status:** {state.status}", _render_execution(state)
 
 
@@ -160,10 +206,18 @@ def _render_sources(sources: list[dict[str, Any]]) -> str:
         arxiv_id = html.escape(str(source.get("arxiv_id") or "Unknown"))
         section_value = source.get("section")
         section = f" · Section: {html.escape(str(section_value))}" if section_value else ""
+        source_type = SOURCE_TYPE_LABELS.get(source.get("source_type"))
+        badge = f"`{source_type}` · " if source_type else ""
+        url = source.get("source_url")
+        link = (
+            f" · [PDF]({html.escape(url, quote=True)})"
+            if isinstance(url, str) and url.startswith("https://arxiv.org/")
+            else ""
+        )
         content = str(source.get("content") or "")
         preview = content if len(content) <= 1200 else f"{content[:1200].rstrip()}…"
         escaped_preview = html.escape(preview).replace("\n", " ")
-        rendered.append(f"### {citation} {title}\n**arXiv:** {arxiv_id}{section}\n\n> {escaped_preview}")
+        rendered.append(f"### {citation} {title}\n{badge}**arXiv:** {arxiv_id}{section}{link}\n\n> {escaped_preview}")
     return "\n\n".join(rendered)
 
 
@@ -203,7 +257,11 @@ def _render_execution(state: DemoState) -> str:
         if state.observability_status:
             observability += f" ({html.escape(state.observability_status)})"
         fields.append(f"Observability: `{observability}`")
-    return "  \n".join(fields) if fields else "_Execution metadata will appear here._"
+    summary = "  \n".join(fields)
+    if state.steps:
+        path = "\n".join(f"- ✓ {html.escape(step)}" for step in state.steps)
+        return f"{summary}\n\n**Execution path**\n{path}" if summary else f"**Execution path**\n{path}"
+    return summary if summary else "_Execution metadata will appear here._"
 
 
 def _optional_text(value: object) -> str | None:

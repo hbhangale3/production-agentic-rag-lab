@@ -76,7 +76,7 @@ async def test_supported_cited_claim_passes_with_deterministic_model_parameters(
 
     assert result == AnswerGroundingResult(score=90, passed=True, grader_version="local-v1")
     assert len(provider.calls) == 1
-    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 32}
+    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 1024}
     sent = payload_of(provider.calls[0][0])
     assert sent["generated_answer"] == ANSWER
     assert sent["sources"][0]["label"] == "[S1]"

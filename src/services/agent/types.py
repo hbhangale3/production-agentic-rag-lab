@@ -24,6 +24,10 @@ class AgentErrorCategory(StrEnum):
     LIVE_SELECTION_FAILURE = "live_selection_failure"
     LIVE_DOCUMENT_PROCESSING_FAILURE = "live_document_processing_failure"
     GENERATION_FAILURE = "generation_failure"
+    # The model answered, but the answer broke the citation contract (structural, not semantic).
+    ANSWER_VALIDATION_FAILURE = "answer_validation_failure"
+    # The answer was cut off at the completion-token limit and the one larger retry was cut off too.
+    GENERATION_INCOMPLETE = "generation_incomplete"
     GROUNDING_FAILURE = "grounding_failure"
     ANSWER_GROUNDING_FAILURE = "answer_grounding_failure"
     INTERNAL_FAILURE = "internal_failure"

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import groq
 import httpx
 import pytest
-from src.exceptions import LLMRequestError, LLMResponseError
+from src.exceptions import IncompleteGenerationError, LLMRequestError, LLMResponseError
 from src.services.llm.base import ChatMessage, LLMCompletion, LLMStreamEvent
 from src.services.llm.groq_provider import GroqLLMProvider
 
@@ -275,3 +275,71 @@ async def test_closing_one_stream_does_not_close_provider_and_next_stream_works(
     assert later == ["second"]
     assert second_stream.closed is True
     client.close.assert_not_awaited()
+
+
+def completion_with_finish(finish_reason):
+    response = completion()
+    response.choices[0].finish_reason = finish_reason
+    return response
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sdk_value", "expected", "truncated"),
+    [
+        ("stop", "stop", False),
+        ("length", "length", True),
+        (" LENGTH ", "length", True),
+        (None, None, False),
+        ("", None, False),
+        (7, None, False),
+        ("content_filter", "content_filter", False),
+    ],
+)
+async def test_completion_finish_reason_is_normalized_and_unknown_values_pass_through(
+    sdk_value, expected, truncated
+) -> None:
+    llm, _ = provider(response=completion_with_finish(sdk_value))
+
+    result = await llm.complete([ChatMessage(role="user", content="question")])
+
+    assert (result.finish_reason, result.truncated) == (expected, truncated)
+
+
+@pytest.mark.anyio
+async def test_completion_without_a_finish_reason_attribute_reports_none() -> None:
+    llm, _ = provider()
+
+    result = await llm.complete([ChatMessage(role="user", content="question")])
+
+    assert (result.finish_reason, result.truncated) == (None, False)
+
+
+@pytest.mark.parametrize("finish_reason", ["", "  ", 3])
+def test_llm_completion_rejects_an_invalid_finish_reason(finish_reason) -> None:
+    with pytest.raises(ValueError, match="finish_reason"):
+        LLMCompletion(content="answer", model="model", finish_reason=finish_reason)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("content", [None, "", "   "])
+async def test_empty_content_at_the_token_limit_is_an_incomplete_generation(content) -> None:
+    response = completion(content)
+    response.choices[0].finish_reason = "length"
+    llm, _ = provider(response=response)
+
+    with pytest.raises(IncompleteGenerationError):
+        await llm.complete([ChatMessage(role="user", content="question")])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("finish_reason", ["stop", None])
+async def test_empty_content_for_any_other_reason_stays_a_malformed_response(finish_reason) -> None:
+    response = completion("")
+    response.choices[0].finish_reason = finish_reason
+    llm, _ = provider(response=response)
+
+    with pytest.raises(LLMResponseError) as caught:
+        await llm.complete([ChatMessage(role="user", content="question")])
+
+    assert not isinstance(caught.value, IncompleteGenerationError)

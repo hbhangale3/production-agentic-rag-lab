@@ -39,7 +39,7 @@ async def test_valid_rewrite_uses_deterministic_model_parameters() -> None:
 
     assert result == QueryRewriteResult(query="machine learning methods applications research")
     assert len(provider.calls) == 1
-    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 128}
+    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 1024}
 
 
 @pytest.mark.anyio

@@ -29,6 +29,7 @@ class AgentExecutionStatus(StrEnum):
     EVIDENCE_RERANK_STARTED = "evidence_rerank_started"
     EVIDENCE_RERANK_COMPLETED = "evidence_rerank_completed"
     GENERATION_STARTED = "generation_started"
+    GENERATION_LENGTH_RECOVERY_STARTED = "generation_length_recovery_started"
     GENERATION_COMPLETED = "generation_completed"
     GROUNDING_STARTED = "grounding_started"
     GROUNDING_PASSED = "grounding_passed"

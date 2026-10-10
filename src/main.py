@@ -8,7 +8,8 @@ from src.db.factory import make_database
 from src.exceptions import LLMConfigurationError
 
 # Week 1: No complex middleware needed
-from src.routers import ask, hybrid_search, papers, ping, search
+from src.routers import agent, ask, hybrid_search, papers, ping, search
+from src.services.agent.wiring import make_agent_service
 from src.services.cache import RAGResponseCacheCoordinator, make_cache
 from src.services.embeddings.factory import make_embedding_provider
 from src.services.evidence import EvidenceContextBuilder
@@ -72,6 +73,8 @@ async def lifespan(app: FastAPI):
     llm_provider = None
     app.state.llm_provider = None
     app.state.rag_generation_service = None
+    app.state.agent_service = None
+    agent_service = None
     try:
         llm_provider = make_llm_provider(settings)
     except LLMConfigurationError:
@@ -83,6 +86,17 @@ async def lifespan(app: FastAPI):
             evidence_builder=EvidenceContextBuilder.from_settings(settings),
             settings=settings,
         )
+        # The agent reuses this worker's LLM, retrieval, lazy BGE provider, generation, cache, and telemetry.
+        agent_service = make_agent_service(
+            settings=settings,
+            llm_provider=llm_provider,
+            hybrid_search_service=app.state.hybrid_search_service,
+            embedding_provider=embedding_provider,
+            rag_generation_service=app.state.rag_generation_service,
+            cache=cache,
+            observability=observability,
+        )
+        app.state.agent_service = agent_service
 
     logger.info("API ready")
     yield
@@ -90,6 +104,8 @@ async def lifespan(app: FastAPI):
     # Cleanup
     database.teardown()
     chunk_index.close()
+    if agent_service is not None:
+        await agent_service.aclose()
     if llm_provider is not None:
         await llm_provider.close()
     await observability.flush()
@@ -106,7 +122,7 @@ app = FastAPI(
 )
 
 # Include routers
-for router in (ping.router, papers.router, ask.router, search.router, hybrid_search.router):
+for router in (ping.router, papers.router, ask.router, agent.router, search.router, hybrid_search.router):
     app.include_router(router, prefix="/api/v1")
 
 

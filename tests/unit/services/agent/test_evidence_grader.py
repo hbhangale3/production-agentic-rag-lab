@@ -60,7 +60,7 @@ async def test_strong_evidence_is_sufficient_with_deterministic_model_parameters
 
     assert result == EvidenceGrade(score=92, sufficient=True, source_count=2)
     assert len(provider.calls) == 1
-    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 32}
+    assert provider.calls[0][1] == {"temperature": 0.0, "max_tokens": 1024}
 
 
 @pytest.mark.anyio
