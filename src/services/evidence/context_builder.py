@@ -1,4 +1,5 @@
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
@@ -33,6 +34,55 @@ class CharacterTokenEstimator:
         return math.ceil(len(text) / self.characters_per_token) if text else 0
 
 
+RetrievalMode = Literal["hybrid", "bm25_fallback", "vector_fallback"]
+
+
+@dataclass(frozen=True)
+class EvidenceInput:
+    """One ranked candidate for the context, independent of where it was retrieved.
+
+    Retrieval scores are optional because evidence that did not come from
+    hybrid search has none.
+    """
+
+    chunk_id: str
+    arxiv_id: str
+    chunk_index: int
+    chunk_text: str
+    paper_title: str = ""
+    section_title: str | None = None
+    authors: tuple[str, ...] = ()
+    categories: tuple[str, ...] = ()
+    published_date: datetime | None = None
+    rrf_score: float | None = None
+    bm25_rank: int | None = None
+    vector_rank: int | None = None
+    bm25_score: float | None = None
+    vector_score: float | None = None
+    source_type: str = "local"
+    source_url: str | None = None
+
+    @classmethod
+    def from_hit(cls, hit: HybridSearchHit) -> "EvidenceInput":
+        return cls(
+            chunk_id=hit.chunk_id,
+            arxiv_id=hit.arxiv_id,
+            chunk_index=hit.chunk_index,
+            chunk_text=hit.chunk_text,
+            paper_title=hit.paper_title,
+            section_title=hit.section_title,
+            # Passed through unchanged; the builder cleans malformed sequences when it selects a source.
+            authors=hit.authors,
+            categories=hit.categories,
+            published_date=hit.published_date,
+            rrf_score=hit.rrf_score,
+            bm25_rank=hit.bm25_rank,
+            vector_rank=hit.vector_rank,
+            bm25_score=hit.bm25_score,
+            vector_score=hit.vector_score,
+        )
+
+
 @dataclass(frozen=True)
 class EvidenceSource:
     """One selected source and its retrieval provenance."""
@@ -48,12 +98,14 @@ class EvidenceSource:
     authors: tuple[str, ...]
     categories: tuple[str, ...]
     published_date: datetime | None
-    rrf_score: float
+    rrf_score: float | None
     bm25_rank: int | None
     vector_rank: int | None
     bm25_score: float | None
     vector_score: float | None
     truncated: bool
+    source_type: str = "local"
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +118,7 @@ class EvidenceContext:
     max_context_tokens: int
     token_counting: str
     query: str
-    retrieval_mode: Literal["hybrid", "bm25_fallback", "vector_fallback"]
+    retrieval_mode: RetrievalMode
     degradation_reason: str | None
 
 
@@ -99,12 +151,28 @@ class EvidenceContextBuilder:
 
     def build(self, result: HybridSearchResult) -> EvidenceContext:
         """Build context in retrieval order without mutating ``result``."""
+        return self.build_from_sources(
+            [EvidenceInput.from_hit(hit) for hit in result.results],
+            query=result.query,
+            retrieval_mode=result.retrieval_mode,
+            degradation_reason=result.degradation_reason,
+        )
+
+    def build_from_sources(
+        self,
+        inputs: Sequence[EvidenceInput],
+        *,
+        query: str,
+        retrieval_mode: RetrievalMode,
+        degradation_reason: str | None = None,
+    ) -> EvidenceContext:
+        """Build context from already-ranked candidates of any provenance, in the given order."""
         blocks: list[str] = []
         sources: list[EvidenceSource] = []
         seen_chunk_ids: set[str] = set()
         seen_evidence: set[str] = set()
 
-        for retrieval_rank, hit in enumerate(result.results, start=1):
+        for retrieval_rank, hit in enumerate(inputs, start=1):
             content = self._clean(hit.chunk_text)
             chunk_id = self._clean(hit.chunk_id)
             if not content or (chunk_id and chunk_id in seen_chunk_ids) or content in seen_evidence:
@@ -146,6 +214,8 @@ class EvidenceContextBuilder:
                     bm25_score=hit.bm25_score,
                     vector_score=hit.vector_score,
                     truncated=truncated,
+                    source_type=hit.source_type,
+                    source_url=hit.source_url,
                 )
             )
             if chunk_id:
@@ -161,15 +231,15 @@ class EvidenceContextBuilder:
             estimated_tokens=self.token_counter.count(text),
             max_context_tokens=self.max_context_tokens,
             token_counting=self.token_counter.description,
-            query=result.query,
-            retrieval_mode=result.retrieval_mode,
-            degradation_reason=result.degradation_reason,
+            query=query,
+            retrieval_mode=retrieval_mode,
+            degradation_reason=degradation_reason,
         )
 
     def _largest_fitting_prefix(
         self,
         label: str,
-        hit: HybridSearchHit,
+        hit: EvidenceInput,
         content: str,
         existing_blocks: list[str],
     ) -> str:
@@ -191,7 +261,7 @@ class EvidenceContextBuilder:
         return best
 
     @classmethod
-    def _render_block(cls, label: str, hit: HybridSearchHit, content: str) -> str:
+    def _render_block(cls, label: str, hit: EvidenceInput, content: str) -> str:
         title = cls._clean(hit.paper_title) or "Unknown title"
         arxiv_id = cls._clean(hit.arxiv_id) or "Unknown"
         chunk_id = cls._clean(hit.chunk_id) or "Unknown"

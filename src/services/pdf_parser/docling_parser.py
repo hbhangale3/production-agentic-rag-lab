@@ -7,7 +7,7 @@ from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc import DocItemLabel
-from src.exceptions import PDFParserError
+from src.exceptions import PDFNoTextError, PDFParserError
 from src.schemas.parsed_pdf import ParsedPDF, ParsedPDFSection
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ class DoclingPDFParser:
 
         raw_text = result.document.export_to_markdown().strip()
         if not raw_text:
-            raise PDFParserError(f"Docling produced no text for PDF: {path}")
+            raise PDFNoTextError(f"Docling produced no text for PDF: {path}")
 
         sections = self._extract_sections(result.document)
         page_count = len(result.pages) if result.pages is not None else None

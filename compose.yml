@@ -1,14 +1,21 @@
+# One Compose project owns the whole stack. Host ports are bound to 127.0.0.1 only;
+# host-level Nginx (deploy/nginx/) is the single public entry point, proxying to Gradio.
+name: production-agentic-rag-lab
+
 services:
   # API service
   api:
     build: .
+    image: production-agentic-rag-lab-api:latest
     container_name: rag-api
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       opensearch:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test:
@@ -27,6 +34,46 @@ services:
       - OPENSEARCH_HOST=http://opensearch:9200
       - POSTGRES_DATABASE_URL=postgresql+psycopg2://rag_user:rag_password@postgres:5432/rag_db
       - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # Gradio UI: the same image as the API, running the UI module. It holds no secrets and no
+  # agent dependencies; it only calls the API over the Compose network.
+  gradio:
+    build: .
+    image: production-agentic-rag-lab-api:latest
+    container_name: rag-gradio
+    command: ["python", "-m", "src.gradio_app"]
+    # An init process forwards SIGTERM, so the container stops promptly instead of being killed.
+    init: true
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:7860:7860"
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - RAG_API_BASE_URL=http://api:8000
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_SERVER_PORT=7860
+      - GRADIO_ANALYTICS_ENABLED=False
+      - HOME=/tmp
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/', timeout=5)\""
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
     networks:
       - rag-network
 
@@ -58,8 +105,8 @@ services:
       - DISABLE_SECURITY_PLUGIN=true
       - bootstrap.memory_lock=true
     ports:
-      - "9200:9200"
-      - "9600:9600"
+      - "127.0.0.1:9200:9200"
+      - "127.0.0.1:9600:9600"
     ulimits:
       memlock:
         soft: -1
@@ -85,12 +132,13 @@ services:
     image: opensearchproject/opensearch-dashboards:2.19.0
     container_name: rag-dashboards
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     environment:
       - OPENSEARCH_HOSTS=http://opensearch:9200
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
     depends_on:
-      - opensearch
+      opensearch:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -101,15 +149,17 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    restart: unless-stopped
     networks:
       - rag-network
 
-  # Airflow service
+  # Airflow service (one container: DB init, then webserver and scheduler; see entrypoint.sh)
   airflow:
     build:
       context: ./airflow
       dockerfile: Dockerfile
     container_name: rag-airflow
+    init: true
 
     # user: "50000:0"  # Uncomment for WSL/Ubuntu, comment out for Mac
 
@@ -135,16 +185,21 @@ services:
       - ./src:/opt/airflow/src
       - ./data:/opt/airflow/data
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
 
     # Command handled by entrypoint.sh
+    # Healthy only when the webserver answers and it reports the metadata DB and scheduler healthy.
     healthcheck:
       test:
-        ["CMD", "curl", "-f", "http://localhost:8080/health"]
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:8080/health | python -c \"import json,sys; h=json.load(sys.stdin); sys.exit(0 if h['metadatabase']['status']=='healthy' and h['scheduler']['status']=='healthy' else 1)\""
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 180s
+    restart: unless-stopped
     networks:
       - rag-network
 
@@ -159,7 +214,7 @@ services:
       - POSTGRES_HOST_AUTH_METHOD=password
       - PGDATA=/var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

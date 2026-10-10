@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from docling.datamodel.base_models import ConversionStatus
 from docling_core.types.doc import DocItemLabel
-from src.exceptions import PDFParserError
+from src.exceptions import PDFNoTextError, PDFParserError
 from src.services.pdf_parser.docling_parser import BYTES_PER_MEGABYTE, DoclingPDFParser
 
 
@@ -123,3 +123,34 @@ async def test_parse_pdf_translates_docling_failure(tmp_path) -> None:
         await parser.parse_pdf(pdf_path)
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+class EmptyTextDocument(FakeDocument):
+    def export_to_markdown(self) -> str:
+        return "  \n\n  "
+
+
+@pytest.mark.anyio
+async def test_parse_pdf_signals_no_extractable_text_with_a_typed_parser_error(tmp_path) -> None:
+    pdf_path = tmp_path / "scanned.pdf"
+    write_pdf(pdf_path)
+    converter = FakeConverter()
+    converter.convert = lambda path, **kwargs: SimpleNamespace(
+        status=ConversionStatus.SUCCESS, document=EmptyTextDocument(), pages=[object()]
+    )
+
+    with pytest.raises(PDFNoTextError, match="produced no text") as caught:
+        await DoclingPDFParser(converter=converter).parse_pdf(pdf_path)
+
+    assert isinstance(caught.value, PDFParserError)
+
+
+@pytest.mark.anyio
+async def test_conversion_failure_is_not_reported_as_no_text(tmp_path) -> None:
+    pdf_path = tmp_path / "broken.pdf"
+    write_pdf(pdf_path)
+
+    with pytest.raises(PDFParserError) as caught:
+        await DoclingPDFParser(converter=FakeConverter(error=RuntimeError("boom"))).parse_pdf(pdf_path)
+
+    assert not isinstance(caught.value, PDFNoTextError)

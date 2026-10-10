@@ -2,7 +2,8 @@ import asyncio
 import logging
 from typing import Any
 
-from src.services.observability.base import ObservabilityStatus, Observation
+from src.services.observability.base import GenerationCost, ObservabilityStatus, Observation
+from src.services.observability.langfuse_prompts import LangfusePromptResolver
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,53 @@ class LangfuseObservation:
             logger.warning("Observability span creation failed; continuing without child telemetry")
             return _INERT_OBSERVATION
         return LangfuseObservation(child)
+
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> Observation:
+        try:
+            child = self._observation.start_observation(
+                name=name,
+                as_type="generation",
+                model=model,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.warning("Observability generation creation failed; continuing without child telemetry")
+            return _INERT_OBSERVATION
+        return LangfuseObservation(child)
+
+    def record_generation(
+        self,
+        *,
+        model: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cost: GenerationCost | None = None,
+    ) -> None:
+        try:
+            kwargs: dict[str, object] = {}
+            if model is not None:
+                kwargs["model"] = model
+            usage = {key: value for key, value in (("input", input_tokens), ("output", output_tokens)) if value is not None}
+            if input_tokens is not None and output_tokens is not None:
+                usage["total"] = input_tokens + output_tokens
+            if usage:
+                kwargs["usage_details"] = usage
+            if cost is not None:
+                kwargs["cost_details"] = {
+                    "input": cost.input_cost,
+                    "output": cost.output_cost,
+                    "total": cost.total_cost,
+                }
+            if kwargs:
+                self._observation.update(**kwargs)
+        except Exception:
+            logger.warning("Observability generation update failed; continuing without usage telemetry")
 
     def update(self, *, metadata: dict[str, object] | None = None, error_type: str | None = None) -> None:
         try:
@@ -44,6 +92,18 @@ class LangfuseObservation:
 class _InertObservation:
     def start_span(self, *, name: str, metadata: dict[str, object] | None = None) -> Observation:
         return self
+
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> Observation:
+        return self
+
+    def record_generation(self, **kwargs: object) -> None:
+        return None
 
     def update(self, *, metadata: dict[str, object] | None = None, error_type: str | None = None) -> None:
         return None
@@ -87,6 +147,14 @@ class LangfuseObservabilityProvider:
             logger.warning("Observability trace creation failed; continuing without telemetry")
             return _INERT_OBSERVATION
         return LangfuseObservation(observation)
+
+    def make_prompt_resolver(self, *, cache_ttl_seconds: int = 60) -> LangfusePromptResolver:
+        """Managed-prompt resolver sharing this provider's client and timeout."""
+        return LangfusePromptResolver(
+            client=self._client,
+            timeout_seconds=self._shutdown_timeout_seconds,
+            cache_ttl_seconds=cache_ttl_seconds,
+        )
 
     async def flush(self) -> None:
         if self._closed:

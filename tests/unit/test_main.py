@@ -38,11 +38,22 @@ async def test_lifespan_builds_worker_scoped_rag_once_and_closes_provider() -> N
             make_provider.assert_called_once_with(settings)
             assert application.state.llm_provider is provider
             assert application.state.rag_generation_service.llm_provider is provider
+            agent = application.state.agent_service
+            assert agent.dependencies.llm_provider is provider
+            assert agent.dependencies.embedding_provider is embedding
+            assert agent.dependencies.hybrid_search_service is application.state.hybrid_search_service
+            assert agent.dependencies.rag_generation_service is application.state.rag_generation_service
+            assert agent.response_cache.cache is cache
+            live_client = agent.dependencies.live_search_service.arxiv_client
+            assert not live_client._client.is_closed
+            embedding.initialize.assert_not_called()
+            embedding.embed_query.assert_not_called()
             provider.close.assert_not_awaited()
             cache.close.assert_not_awaited()
 
     provider.close.assert_awaited_once_with()
     cache.close.assert_awaited_once_with()
+    assert live_client._client.is_closed
     database.teardown.assert_called_once_with()
     chunk_index.close.assert_called_once_with()
 
@@ -69,6 +80,7 @@ async def test_lifespan_without_credentials_keeps_non_rag_services_available() -
             assert application.state.hybrid_search_service is not None
             assert application.state.llm_provider is None
             assert application.state.rag_generation_service is None
+            assert application.state.agent_service is None
             assert application.state.cache is cache
 
     database.teardown.assert_called_once_with()

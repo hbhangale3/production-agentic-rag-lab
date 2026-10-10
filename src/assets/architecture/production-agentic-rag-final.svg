@@ -1,0 +1,248 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1262" width="1600" height="1262" role="img" aria-labelledby="t d">
+<title id="t">Production Agentic RAG: end-to-end query journey</title>
+<desc id="d">Offline ingestion with Airflow, Docling, PostgreSQL and OpenSearch; an online LangGraph agent workflow with a Redis agent cache, local hybrid retrieval, live arXiv fallback, common BGE rerank, grounded generation, structural and semantic validation; Langfuse observability; and the deployment path.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/></marker><filter id="shadow" x="-5%" y="-5%" width="110%" height="115%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.10"/></filter></defs>
+<rect width="1600" height="1262" fill="#ffffff"/>
+<text x="800.0" y="40" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="28" font-weight="700" fill="#0f172a" text-anchor="middle">Production Agentic RAG — End-to-End Query Journey</text>
+<text x="800.0" y="66" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="400" fill="#475569" text-anchor="middle">Local-first grounded RAG with an agent cache, live arXiv fallback, answer validation, Langfuse observability, and a Gradio UI</text>
+<rect x="24" y="86" width="1104" height="156" rx="14" fill="#fffbeb" stroke="#e7c873" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="42" y="114" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="17" font-weight="700" fill="#0f172a" text-anchor="start">Research Ingestion Pipeline · Apache Airflow (offline)</text>
+<rect x="40" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="100.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">arXiv discovery</text>
+<text x="100.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">new papers</text>
+<rect x="174" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="234.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Airflow DAG</text>
+<text x="234.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">scheduled run</text>
+<path d="M 161 155.0 L 173 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="308" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="368.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Paper acquisition</text>
+<text x="368.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">PDF download</text>
+<path d="M 295 155.0 L 307 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="442" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="502.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Docling parsing</text>
+<text x="502.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">sections + text</text>
+<path d="M 429 155.0 L 441 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="576" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="636.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Persist</text>
+<text x="636.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">metadata + text</text>
+<path d="M 563 155.0 L 575 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="710" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="770.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Chunk</text>
+<text x="770.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">section-aware</text>
+<path d="M 697 155.0 L 709 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="844" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="904.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">BGE embeddings</text>
+<text x="904.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">384-dimensional</text>
+<path d="M 831 155.0 L 843 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="978" y="126" width="121" height="58" rx="9" fill="#fcd34d" stroke="#b45309" stroke-width="1.6"/>
+<text x="1038.5" y="152.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Index</text>
+<text x="1038.5" y="168.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">OpenSearch</text>
+<path d="M 965 155.0 L 977 155.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="40" y="218" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="start">Embedding model: BAAI/bge-small-en-v1.5 (384-dimensional), the same model that embeds queries and reranks evidence online.</text>
+<rect x="1148" y="86" width="428" height="156" rx="14" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1166" y="114" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="17" font-weight="700" fill="#0f172a" text-anchor="start">Storage &amp; Local Corpus</text>
+<rect x="1164" y="124" width="192" height="104" rx="9" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.6"/>
+<text x="1260.0" y="166.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="650" fill="#0f172a" text-anchor="middle">PostgreSQL</text>
+<text x="1260.0" y="183.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">canonical paper metadata</text>
+<text x="1260.0" y="199.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">parsed paper text</text>
+<rect x="1368" y="124" width="192" height="104" rx="9" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.6"/>
+<text x="1464.0" y="158.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="650" fill="#0f172a" text-anchor="middle">OpenSearch</text>
+<text x="1464.0" y="175.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">chunk documents</text>
+<text x="1464.0" y="191.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">BM25 index</text>
+<text x="1464.0" y="207.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">vector HNSW index</text>
+<path d="M 1128 155 L 1147 155" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="24" y="258" width="1552" height="794" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="42" y="286" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="17" font-weight="700" fill="#0f172a" text-anchor="start">Online Query Path</text>
+<rect x="58" y="300" width="274" height="80" rx="9" fill="#eef2ff" stroke="#818cf8" stroke-width="1.6"/>
+<text x="195.0" y="338.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">User</text>
+<text x="195.0" y="355.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">asks a research question in the browser</text>
+<rect x="364" y="300" width="274" height="80" rx="9" fill="#eef2ff" stroke="#818cf8" stroke-width="1.6"/>
+<text x="501.0" y="338.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Nginx → Gradio UI</text>
+<text x="501.0" y="355.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">HTTPS · streamed status updates</text>
+<rect x="670" y="300" width="274" height="80" rx="9" fill="#ecfdf5" stroke="#34d399" stroke-width="1.6"/>
+<text x="807.0" y="330.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">FastAPI agent API</text>
+<text x="807.0" y="347.5" font-family="'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">POST /api/v1/agent/ask</text>
+<text x="807.0" y="364.0" font-family="'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="400" fill="#475569" text-anchor="middle">POST /api/v1/agent/ask/stream</text>
+<rect x="976" y="300" width="274" height="80" rx="9" fill="#fef2f2" stroke="#f87171" stroke-width="1.6"/>
+<text x="1113.0" y="330.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Redis agent cache</text>
+<text x="1113.0" y="347.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">agent-aware exact validated-response cache</text>
+<text x="1113.0" y="363.5" font-family="'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">rag:agent-response:v1:&lt;sha256&gt;</text>
+<rect x="1282" y="300" width="274" height="80" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.6"/>
+<text x="1419.0" y="330.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Validated cached response</text>
+<text x="1419.0" y="347.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">returned to the user</text>
+<text x="1419.0" y="364.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">the graph is not executed</text>
+<path d="M 332 340.0 L 363 340.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 638 340.0 L 669 340.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 944 340.0 L 975 340.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 1250 340.0 L 1281 340.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="1266.0" y="332.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="700" fill="#15803d" text-anchor="middle">HIT</text>
+<circle cx="74" cy="300" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="74" y="305" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">1</text>
+<circle cx="992" cy="300" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="992" y="305" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">2</text>
+<text x="58" y="404" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">Cache key covers: normalized question · corpus identity · retrieval / embedding config ·</text>
+<text x="58" y="421" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">agent config · prompt identities · answer-affecting generation config</text>
+<rect x="38" y="438" width="1526" height="602" rx="12" fill="#fdf2f8" stroke="#f472b6" stroke-width="1.6"/>
+<text x="1548" y="461" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#9d174d" text-anchor="end">Agentic Orchestration (LangGraph) · stateful control graph · bounded conditional execution</text>
+<path d="M 1113.0 380 L 1113.0 437" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="1103.0" y="412" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="700" fill="#b91c1c" text-anchor="end">MISS</text>
+<rect x="58" y="502" width="274" height="70" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+<text x="195.0" y="535.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Guardrail</text>
+<text x="195.0" y="552.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">research-scope check</text>
+<rect x="364" y="502" width="274" height="70" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+<text x="501.0" y="535.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Local hybrid retrieval</text>
+<text x="501.0" y="552.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">BM25 + vector + RRF · OpenSearch</text>
+<rect x="670" y="502" width="274" height="70" rx="9" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.6"/>
+<text x="807.0" y="535.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Evidence sufficiency grading</text>
+<text x="807.0" y="552.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">is the retrieved evidence enough?</text>
+<rect x="976" y="502" width="274" height="70" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.6"/>
+<text x="1113.0" y="535.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Query rewrite</text>
+<text x="1113.0" y="552.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">only if evidence is insufficient</text>
+<rect x="1282" y="502" width="274" height="70" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.6"/>
+<text x="1419.0" y="535.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">One local retry</text>
+<text x="1419.0" y="552.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">retrieve and grade again</text>
+<path d="M 332 537.0 L 363 537.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 638 537.0 L 669 537.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 944 537.0 L 975 537.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 1250 537.0 L 1281 537.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<circle cx="74" cy="502" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="74" y="507" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">3</text>
+<circle cx="380" cy="502" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="380" y="507" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">4</text>
+<path d="M 807.0 502 L 807.0 486 L 47 486 L 47 765.0 L 57 765.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="58" y="479" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="600" fill="#475569" text-anchor="start">evidence sufficient (first pass or after the retry) → skip the live fallback</text>
+<path d="M 1419.0 572 L 1419.0 596 L 195.0 596 L 195.0 615" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="807.0" y="589" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="700" fill="#be123c" text-anchor="middle">still insufficient → live arXiv fallback</text>
+<rect x="58" y="616" width="274" height="70" rx="9" fill="#fff1f2" stroke="#e11d48" stroke-width="1.6"/>
+<text x="195.0" y="649.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Live arXiv search</text>
+<text x="195.0" y="666.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">metadata / abstract search</text>
+<rect x="364" y="616" width="274" height="70" rx="9" fill="#fff1f2" stroke="#e11d48" stroke-width="1.6"/>
+<text x="501.0" y="649.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Bounded paper selection</text>
+<text x="501.0" y="666.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">a few most relevant papers</text>
+<rect x="670" y="616" width="274" height="70" rx="9" fill="#fff1f2" stroke="#e11d48" stroke-width="1.6"/>
+<text x="807.0" y="649.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Selective PDF acquisition</text>
+<text x="807.0" y="666.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">selected papers only</text>
+<rect x="976" y="616" width="274" height="70" rx="9" fill="#fff1f2" stroke="#e11d48" stroke-width="1.6"/>
+<text x="1113.0" y="649.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Docling parse</text>
+<text x="1113.0" y="666.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">PDF → sections and text</text>
+<rect x="1282" y="616" width="274" height="70" rx="9" fill="#fff1f2" stroke="#e11d48" stroke-width="1.6"/>
+<text x="1419.0" y="649.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Transient evidence</text>
+<text x="1419.0" y="666.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">held in memory · never indexed</text>
+<path d="M 332 651.0 L 363 651.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 638 651.0 L 669 651.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 944 651.0 L 975 651.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 1250 651.0 L 1281 651.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<circle cx="74" cy="616" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="74" y="621" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">5</text>
+<path d="M 1419.0 686 L 1419.0 710 L 195.0 710 L 195.0 729" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="807.0" y="703" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="700" fill="#6d28d9" text-anchor="middle">local candidates + live candidates → merge, rerank, generate</text>
+<rect x="58" y="730" width="274" height="70" rx="9" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6"/>
+<text x="195.0" y="763.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Normalize candidates</text>
+<text x="195.0" y="780.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">local + live → one evidence format</text>
+<rect x="364" y="730" width="274" height="70" rx="9" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6"/>
+<text x="501.0" y="763.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Common BGE semantic rerank</text>
+<text x="501.0" y="780.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">bge-small-en-v1.5 · one shared scale</text>
+<rect x="670" y="730" width="274" height="70" rx="9" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6"/>
+<text x="807.0" y="763.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Final evidence set</text>
+<text x="807.0" y="780.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">numbered sources [S1] … [Sn]</text>
+<rect x="976" y="730" width="274" height="70" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+<text x="1113.0" y="763.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Grounded generation</text>
+<text x="1113.0" y="780.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">Groq LLM · answer cites its sources</text>
+<path d="M 332 765.0 L 363 765.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 638 765.0 L 669 765.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 944 765.0 L 975 765.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<circle cx="992" cy="730" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="992" y="735" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">6</text>
+<rect x="1282" y="730" width="274" height="70" rx="9" fill="#ffffff" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="4 4"/>
+<text x="1419.0" y="750" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">Local OpenSearch scores are never</text>
+<text x="1419.0" y="768" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">compared with live scores: every candidate</text>
+<text x="1419.0" y="786" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">is re-scored against the question.</text>
+<path d="M 1113.0 800 L 1113.0 824 L 195.0 824 L 195.0 843" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="654.0" y="817" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="700" fill="#15803d" text-anchor="middle">validation before anything is returned</text>
+<rect x="58" y="844" width="274" height="70" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.6"/>
+<text x="195.0" y="877.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Finish-reason check</text>
+<text x="195.0" y="894.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">complete → validate</text>
+<rect x="364" y="844" width="274" height="70" rx="9" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<text x="501.0" y="877.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Structural validation</text>
+<text x="501.0" y="894.75" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">citation / answer-contract validation</text>
+<rect x="670" y="844" width="274" height="70" rx="9" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.6"/>
+<text x="807.0" y="869.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="650" fill="#0f172a" text-anchor="middle">Semantic answer grounding grader</text>
+<text x="807.0" y="886.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle" font-style="italic">“Does the completed answer remain supported</text>
+<text x="807.0" y="901.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="400" fill="#475569" text-anchor="middle" font-style="italic">by the exact evidence provided?”</text>
+<rect x="976" y="844" width="580" height="92" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="1.6"/>
+<text x="1266.0" y="880.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Validated response</text>
+<text x="1266.0" y="897.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">validated answer · sources / citations · cache status · grounding status</text>
+<text x="1266.0" y="914.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">execution path · latency / model / token metadata</text>
+<path d="M 332 879.0 L 363 879.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 638 879.0 L 669 879.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<path d="M 944 879.0 L 975 879.0" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="960.0" y="896.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="700" fill="#15803d" text-anchor="middle">pass</text>
+<circle cx="380" cy="844" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="380" y="849" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">7</text>
+<circle cx="992" cy="844" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="992" y="849" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">8</text>
+<rect x="58" y="958" width="274" height="70" rx="9" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+<text x="195.0" y="983.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="16" font-weight="650" fill="#0f172a" text-anchor="middle">Length recovery</text>
+<text x="195.0" y="1000.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">one regeneration with a larger</text>
+<text x="195.0" y="1017.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="400" fill="#475569" text-anchor="middle">bounded token allowance</text>
+<path d="M 195.0 914 L 195.0 957" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="204.0" y="941" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="600" fill="#475569" text-anchor="start">finish_reason = length</text>
+<path d="M 332 993.0 L 471.0 993.0 L 471.0 915" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="670" y="958" width="274" height="70" rx="9" fill="#fff7ed" stroke="#ea580c" stroke-width="1.6"/>
+<text x="807.0" y="991.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="650" fill="#0f172a" text-anchor="middle">Bounded grounding regeneration</text>
+<text x="807.0" y="1008.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">same evidence · at most 2 grounding attempts</text>
+<path d="M 807.0 914 L 807.0 957" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="816.0" y="941" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="700" fill="#b45309" text-anchor="start">fail</text>
+<path d="M 670 993.0 L 531.0 993.0 L 531.0 915" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="540.0" y="941" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12" font-weight="600" fill="#475569" text-anchor="start">validate again</text>
+<rect x="976" y="958" width="580" height="70" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1266.0" y="983.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="15" font-weight="650" fill="#0f172a" text-anchor="middle">Safe terminal outcomes</text>
+<text x="1266.0" y="1000.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">out of scope · insufficient evidence · no validated answer</text>
+<text x="1266.0" y="1016.0" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="middle">partial or rejected model text is never returned</text>
+<path d="M 1556 874 L 1570 874 L 1570 394 L 1220 394 L 1220 381" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round" stroke-dasharray="6 4"/>
+<text x="1556" y="412" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="600" fill="#475569" text-anchor="end">validated response is written to the cache and returned to the user</text>
+<rect x="24" y="1070" width="936" height="150" rx="14" fill="#faf5ff" stroke="#c084fc" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="42" y="1098" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="17" font-weight="700" fill="#0f172a" text-anchor="start">Observability — Langfuse</text>
+<rect x="40" y="1114" width="170" height="62" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.6"/>
+<text x="125.0" y="1142.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Traces &amp; spans</text>
+<text x="125.0" y="1158.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">every graph node</text>
+<rect x="222" y="1114" width="170" height="62" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.6"/>
+<text x="307.0" y="1142.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Generation observations</text>
+<text x="307.0" y="1158.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">one per LLM call</text>
+<rect x="404" y="1114" width="170" height="62" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.6"/>
+<text x="489.0" y="1142.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Prompt versioning</text>
+<text x="489.0" y="1158.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">linked to generations</text>
+<rect x="586" y="1114" width="170" height="62" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.6"/>
+<text x="671.0" y="1142.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Latency · tokens</text>
+<text x="671.0" y="1158.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">cost when available</text>
+<rect x="768" y="1114" width="170" height="62" rx="9" fill="#ffffff" stroke="#c4b5fd" stroke-width="1.6"/>
+<text x="853.0" y="1142.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13" font-weight="650" fill="#0f172a" text-anchor="middle">Safe metadata only</text>
+<text x="853.0" y="1158.5" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="11.5" font-weight="400" fill="#475569" text-anchor="middle">content capture off by default</text>
+<text x="40" y="1202" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">Tracing never changes an answer and never blocks a request.</text>
+<rect x="980" y="1070" width="596" height="150" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="998" y="1098" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="17" font-weight="700" fill="#0f172a" text-anchor="start">Deployment</text>
+<rect x="996" y="1114" width="94" height="38" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1043.0" y="1138.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13.5" font-weight="650" fill="#0f172a" text-anchor="middle">Browser</text>
+<rect x="1112" y="1114" width="94" height="38" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1159.0" y="1138.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13.5" font-weight="650" fill="#0f172a" text-anchor="middle">HTTPS</text>
+<path d="M 1090 1133 L 1111 1133" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="1228" y="1114" width="94" height="38" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1275.0" y="1138.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13.5" font-weight="650" fill="#0f172a" text-anchor="middle">Nginx</text>
+<path d="M 1206 1133 L 1227 1133" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="1344" y="1114" width="94" height="38" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1391.0" y="1138.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13.5" font-weight="650" fill="#0f172a" text-anchor="middle">Gradio</text>
+<path d="M 1322 1133 L 1343 1133" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<rect x="1460" y="1114" width="94" height="38" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="1507.0" y="1138.25" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="13.5" font-weight="650" fill="#0f172a" text-anchor="middle">FastAPI</text>
+<path d="M 1438 1133 L 1459 1133" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="996" y="1180" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="650" fill="#0f172a" text-anchor="start">Docker Compose + systemd</text>
+<text x="996" y="1202" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">Only Nginx is public; every service port stays on the host loopback.</text>
+<path d="M 40 1243 L 92 1243" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round"/>
+<text x="102" y="1247" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">request path</text>
+<path d="M 214 1243 L 266 1243" fill="none" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow)" stroke-linejoin="round" stroke-dasharray="6 4"/>
+<text x="276" y="1247" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">cache write-back</text>
+<circle cx="420" cy="1243" r="13" fill="#2563eb" stroke="#ffffff" stroke-width="2"/>
+<text x="420" y="1248" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">#</text>
+<text x="440" y="1247" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="start">query journey step</text>
+<text x="1576" y="1247" font-family="Inter, 'Helvetica Neue', Helvetica, Arial, 'Liberation Sans', sans-serif" font-size="12.5" font-weight="400" fill="#475569" text-anchor="end">Every path shown is implemented.</text>
+</svg>

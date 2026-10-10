@@ -294,6 +294,72 @@ async def test_download_pdf_raises_for_http_failure(tmp_path, paper: ArxivPaper)
     assert not (tmp_path / "2412.12345.pdf.part").exists()
 
 
+@pytest.mark.anyio
+async def test_download_pdf_can_use_a_per_call_directory_without_touching_the_cache(tmp_path, paper: ArxivPaper) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"%PDF-1.7\nmock", request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path / "cache",
+        http_client=http_client,
+    )
+    try:
+        pdf_path = await client.download_pdf(paper, cache_dir=tmp_path / "transient", max_bytes=1024)
+    finally:
+        await http_client.aclose()
+
+    assert pdf_path == tmp_path / "transient" / "2412.12345.pdf"
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+    assert not (tmp_path / "cache").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("declare_length", [True, False])
+async def test_download_pdf_enforces_max_bytes_without_retrying(tmp_path, paper: ArxivPaper, declare_length: bool) -> None:
+    requests = 0
+
+    async def body():
+        yield b"%PDF-1.7\n"
+        yield b"x" * 64
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if declare_length:
+            return httpx.Response(200, content=b"%PDF-1.7\n" + b"x" * 64, request=request)
+        return httpx.Response(200, content=body(), request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ArxivClient(
+        base_url="https://export.arxiv.org/api/query",
+        rate_limit_delay=0,
+        pdf_cache_dir=tmp_path,
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(ArxivPDFDownloadError, match="exceeds the 32 byte limit"):
+            await client.download_pdf(paper, max_bytes=32)
+    finally:
+        await http_client.aclose()
+
+    assert requests == 1
+    assert not (tmp_path / "2412.12345.pdf").exists()
+    assert not (tmp_path / "2412.12345.pdf.part").exists()
+
+
+@pytest.mark.anyio
+async def test_download_pdf_rejects_non_positive_max_bytes(tmp_path, paper: ArxivPaper) -> None:
+    client = ArxivClient(base_url="https://export.arxiv.org/api/query", rate_limit_delay=0, pdf_cache_dir=tmp_path)
+    try:
+        with pytest.raises(ValueError, match="max_bytes"):
+            await client.download_pdf(paper, max_bytes=0)
+    finally:
+        await client.aclose()
+
+
 def test_pdf_filename_is_safe_for_legacy_and_malicious_ids() -> None:
     assert ArxivClient.pdf_filename("hep-th/9901001") == "hep-th_9901001.pdf"
     assert ArxivClient.pdf_filename("../../dangerous/id") == "dangerous_id.pdf"

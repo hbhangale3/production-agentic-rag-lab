@@ -1,0 +1,29 @@
+# One unit for the whole Docker Compose stack. Compose owns ordering, health and restarts;
+# this unit only brings the stack up at boot and stops it cleanly at shutdown.
+#
+# Install:
+#   sudo install -m 0644 deploy/systemd/production-agentic-rag.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now production-agentic-rag.service
+[Unit]
+Description=Production Agentic RAG Docker Compose stack
+Documentation=file:///home/harsh/projects/production-agentic-rag-lab/docs/week7-m11-compose-stack-autostart.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=harsh
+Group=docker
+WorkingDirectory=/home/harsh/projects/production-agentic-rag-lab
+# --wait returns only when every service is running and healthy, so the unit state is truthful.
+ExecStart=/usr/bin/docker compose up -d --wait --wait-timeout 600
+# Stop containers without removing them or any volume.
+ExecStop=/usr/bin/docker compose stop --timeout 60
+TimeoutStartSec=660
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

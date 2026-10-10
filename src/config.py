@@ -54,6 +54,9 @@ class Settings(DefaultSettings):
     evidence_context_max_tokens: int = Field(default=6000, gt=0)
     llm_temperature: float = Field(default=0.1, ge=0, le=2)
     llm_max_completion_tokens: int = Field(default=1024, gt=0)
+    # Absolute cap for the one larger allowance used to redo an answer the provider cut off at the
+    # limit. The allowance is min(2 x normal, this cap, what the context window leaves for the prompt).
+    llm_length_recovery_max_tokens: int = Field(default=4096, gt=0)
     llm_context_window_tokens: int = Field(default=8192, gt=0)
     llm_token_safety_margin: int = Field(default=256, ge=0)
     rag_retrieval_size: int = Field(default=5, gt=0, le=100)
@@ -72,6 +75,19 @@ class Settings(DefaultSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_capture_content: bool = False
     langfuse_timeout_seconds: int = Field(default=5, gt=0, le=30)
+    # Week 7 agent runtime bounds
+    # Sized from measurement: one Docling conversion takes about 160 s on the 6-core CPU-only VPS,
+    # and a live fallback processes up to two papers after several model calls.
+    agent_request_timeout_seconds: float = Field(default=540.0, gt=0, le=900)
+    agent_live_paper_timeout_seconds: float = Field(default=240.0, gt=0, le=600)
+    agent_live_arxiv_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+    agent_live_arxiv_max_retries: int = Field(default=1, ge=0, le=3)
+    langfuse_prompt_management_enabled: bool = False
+    langfuse_prompt_label: str = Field(default="production", min_length=1, pattern=r".*\S.*")
+    langfuse_prompt_cache_ttl_seconds: int = Field(default=60, ge=0)
+    # Token prices in US dollars per million tokens. Cost is reported only when both are set.
+    llm_input_cost_per_million_tokens: float | None = Field(default=None, ge=0)
+    llm_output_cost_per_million_tokens: float | None = Field(default=None, ge=0)
 
     # arXiv API configuration
     arxiv_api_base_url: str = "https://export.arxiv.org/api/query"

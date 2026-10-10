@@ -20,6 +20,7 @@ dependencies = [
     "gradio>=6.15.1",
     "redis>=8.1.0",
     "langfuse>=4.17.0",
+    "langgraph>=1.2.14",
 ]
 readme = "README.md"
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-SUPPORTED_EVENTS = frozenset({"metadata", "delta", "sources", "done", "error"})
+SUPPORTED_EVENTS = frozenset({"metadata", "status", "delta", "answer", "sources", "outcome", "done", "error"})
 
 
 class RAGUIClientError(Exception):
@@ -99,6 +99,8 @@ class JSONSSEParser:
 class RAGStreamClient:
     """Small HTTP/SSE client for the authoritative FastAPI RAG endpoint."""
 
+    endpoint_path = "/api/v1/ask/stream"
+
     def __init__(
         self,
         *,
@@ -109,7 +111,7 @@ class RAGStreamClient:
         normalized = base_url.strip().rstrip("/")
         if not normalized:
             raise ValueError("base_url must not be blank")
-        self.endpoint = f"{normalized}/api/v1/ask/stream"
+        self.endpoint = f"{normalized}{self.endpoint_path}"
         self.timeout = httpx.Timeout(timeout_seconds)
         self.transport = transport
 
@@ -160,4 +162,21 @@ class RAGStreamClient:
             return RAGUIClientError("The generated answer could not be validated.")
         if status_code == 503:
             return RAGUIClientError("RAG API is temporarily unavailable.")
+        if status_code == 504:
+            return RAGUIClientError("RAG API took too long to respond.")
         return RAGUIClientError("RAG API request failed.")
+
+
+class AgentStreamClient(RAGStreamClient):
+    """Client for the agent SSE endpoint; a live fallback can take minutes, so the timeout is longer."""
+
+    endpoint_path = "/api/v1/agent/ask/stream"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        timeout_seconds: float = 240.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        super().__init__(base_url=base_url, timeout_seconds=timeout_seconds, transport=transport)

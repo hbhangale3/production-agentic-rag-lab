@@ -33,6 +33,115 @@ By the end of this course, you'll have your own AI research assistant and the sk
 
 ---
 
+## 🤖 Week 7: Agentic RAG
+
+A bounded LangGraph agent answers research questions about AI, machine
+learning, NLP, and healthcare AI. It retrieves from the local corpus, checks
+whether that evidence is sufficient, falls back to live arXiv when it is not,
+and only returns an answer that has passed semantic grounding against the
+exact sources it was written from.
+
+```text
+User -> Gradio -> FastAPI
+  -> resolve prompt bundle -> agent cache lookup (Redis)
+       HIT  -> validated cached answer, graph not run
+       MISS -> LangGraph
+                 guardrail (in scope?)
+                 local hybrid retrieval (BM25 + BGE vectors, RRF)
+                 evidence-sufficiency grader
+                   insufficient -> rewrite query once -> local retry -> grade again
+                   still insufficient -> live arXiv search
+                                         -> select up to 2 papers -> PDF -> Docling -> chunks
+                 normalize local + live evidence -> common BGE rerank -> top sources
+                 grounded generation -> structural citation validation
+                 semantic answer grounding -> regenerate once if it fails
+               -> cache only a grounded, cited answer -> response
+```
+
+Langfuse (optional, metadata-only by default) records every model call as a
+generation with model, token usage, latency, and prompt identity. Redis and
+Langfuse outages never make the agent unavailable.
+
+**Key technologies:** FastAPI, LangGraph, Groq (via a provider-neutral LLM
+interface), OpenSearch, sentence-transformers BGE embeddings, Docling, Redis,
+Langfuse, PostgreSQL, Airflow, Gradio.
+
+### Agent endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/agent/ask` | One JSON response: answer, sources, cache status, outcome |
+| `POST /api/v1/agent/ask/stream` | Server-sent events: safe execution statuses, then the validated answer |
+| `POST /api/v1/ask`, `POST /api/v1/ask/stream` | The Week 5/6 single-pass RAG endpoints, unchanged |
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question": "How can AI improve healthcare access for underserved populations?"}'
+```
+
+The response reports `outcome` as `answered`, `out_of_scope`,
+`insufficient_evidence`, `grounding_failed`, or `generation_failed`. A model-written answer is
+returned only for `answered`; the stream never emits an answer before it has
+passed grounding, and it never exposes model reasoning.
+
+### Run it locally
+
+```bash
+docker compose up -d --build               # the whole stack, including the Gradio UI
+curl http://127.0.0.1:8000/api/v1/health   # API
+# Gradio UI: http://127.0.0.1:7860
+```
+
+One Compose project runs PostgreSQL, Redis, OpenSearch, OpenSearch
+Dashboards, Airflow, the API, and Gradio. Every port is published on
+`127.0.0.1` only, and every service restarts unless stopped. Gradio runs the
+API image and calls the API over the Compose network (`http://api:8000`).
+
+The demo is public at <https://agenticrag.hbapps.dedyn.io>.
+
+<p align="center">
+  <img src="static/week7_gradio_ui.png" alt="Gradio demo showing a grounded answer, summary badges, the execution path, and source cards" width="800">
+</p>
+
+It shows the validated answer, a one-line summary (`CACHE HIT`/`MISS`,
+`GROUNDED`, latency, model, source count, tokens), the execution path as the
+backend reported it, and one card per source labeled `LOCAL` or
+`LIVE ARXIV`. A collapsed "How this system works" section holds the
+architecture diagram:
+
+<p align="center">
+  <img src="src/assets/architecture/production-agentic-rag-final.png" alt="Production Agentic RAG architecture: offline ingestion, online agent query path, validation, caching, observability" width="900">
+</p>
+
+The system searches the local corpus first, rewrites the query and falls
+back to live arXiv only when the evidence is insufficient, reranks all
+evidence on one embedding scale, and validates the cited answer structurally
+and semantically before returning or caching it. The diagram lives in
+`src/assets/architecture/` (inside `src/` so the Docker image includes it);
+UI notes are in `docs/week7-m13-ui-polish-architecture.md`.
+
+On a server, one systemd unit starts the stack at boot
+(`deploy/systemd/production-agentic-rag.service`):
+
+```bash
+sudo systemctl start|stop|restart|status production-agentic-rag.service
+docker compose ps -a
+docker compose logs --tail=200 <service>
+```
+
+Design notes for each milestone are in `docs/week7-m01-*.md` through
+`docs/week7-m10-agent-api-gradio-acceptance.md`; the stack, ports, and
+autostart are in `docs/week7-m11-compose-stack-autostart.md`.
+
+Host-level Nginx is the only public entry point. It terminates HTTPS for
+<https://agenticrag.hbapps.dedyn.io> and proxies to Gradio on
+`127.0.0.1:7860`; the API and every other service stay private. The config
+and installer are in `deploy/nginx/`, and DNS, certificates, timeouts, and
+troubleshooting are in `docs/week7-m12-nginx-https-reverse-proxy.md`.
+
+---
+
 ## 🚀 Quick Start
 
 ### Week 6 RAG demo
@@ -55,6 +164,9 @@ Run the API and demo locally with:
 uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
 RAG_API_BASE_URL=http://127.0.0.1:8001 uv run python -m src.gradio_app
 ```
+
+The Gradio demo now calls the Week 7 agent endpoint and defaults to the Docker
+API at `http://127.0.0.1:8000`; set `RAG_API_BASE_URL` to point it elsewhere.
 
 ### **📋 Prerequisites**
 - **Docker Desktop** (with Docker Compose)  

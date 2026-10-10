@@ -3,8 +3,8 @@ from typing import Any
 
 import groq
 from groq import AsyncGroq
-from src.exceptions import LLMRequestError, LLMResponseError
-from src.services.llm.base import ChatMessage, LLMCompletion, LLMStreamEvent
+from src.exceptions import IncompleteGenerationError, LLMRequestError, LLMResponseError
+from src.services.llm.base import FINISH_REASON_LENGTH, ChatMessage, LLMCompletion, LLMStreamEvent
 
 
 class GroqLLMProvider:
@@ -67,7 +67,11 @@ class GroqLLMProvider:
             content = choice.message.content
         except (AttributeError, IndexError, TypeError) as exc:
             raise LLMResponseError("Groq returned a malformed completion response") from exc
+        finish_reason = self._finish_reason(choice)
         if not isinstance(content, str) or not content.strip():
+            if finish_reason == FINISH_REASON_LENGTH:
+                # A reasoning model can spend the whole allowance before writing any answer text.
+                raise IncompleteGenerationError("Groq stopped at the completion-token limit before any content")
             raise LLMResponseError("Groq returned empty completion content")
 
         response_model = getattr(response, "model", None)
@@ -79,6 +83,7 @@ class GroqLLMProvider:
             model=response_model,
             prompt_tokens=self._optional_token_count(usage, "prompt_tokens"),
             completion_tokens=self._optional_token_count(usage, "completion_tokens"),
+            finish_reason=finish_reason,
         )
 
     async def stream(
@@ -170,6 +175,14 @@ class GroqLLMProvider:
         self._closed = True
         if self._owns_client:
             await self._client.close()
+
+    @staticmethod
+    def _finish_reason(choice: Any) -> str | None:
+        """Groq uses the OpenAI values ("stop", "length", ...); normalize case, keep unknown values."""
+        value = getattr(choice, "finish_reason", None)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip().lower()
 
     @staticmethod
     def _optional_token_count(usage: Any, field_name: str) -> int | None:

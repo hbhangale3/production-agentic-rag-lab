@@ -7,6 +7,18 @@ class NoOpObservation:
     def start_span(self, *, name: str, metadata: dict[str, object] | None = None) -> "NoOpObservation":
         return self
 
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> "NoOpObservation":
+        return self
+
+    def record_generation(self, **kwargs: object) -> None:
+        return None
+
     def update(self, *, metadata: dict[str, object] | None = None, error_type: str | None = None) -> None:
         return None
 

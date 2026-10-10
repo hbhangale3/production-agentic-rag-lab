@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from src.gradio_client import (
+    AgentStreamClient,
     IncompleteStreamError,
     JSONSSEParser,
     RAGStreamClient,
@@ -199,3 +200,111 @@ async def test_client_rejects_blank_question_without_transport_call() -> None:
     with pytest.raises(ValueError, match="blank"):
         _ = [event async for event in client.stream("  ")]
     assert called is False
+
+
+def test_parser_accepts_agent_status_answer_and_outcome_events() -> None:
+    payload = (
+        frame("metadata", {"cache_status": "miss", "pipeline_version": "v1"})
+        + frame("status", {"code": "guardrail_passed", "message": "Guardrail passed"})
+        + frame("status", {"code": "local_retrieval_completed", "message": "Local retrieval completed"})
+        + frame("answer", {"text": "Grounded [S1]."})
+        + frame("sources", {"sources": [{"citation": "[S1]", "source_type": "live_arxiv"}]})
+        + frame("outcome", {"outcome": "insufficient_evidence", "message": "Not enough evidence."})
+        + frame("done", {"outcome": "answered", "grounding_passed": True})
+    )
+
+    events = JSONSSEParser().feed(payload)
+
+    assert [event.event for event in events] == ["metadata", "status", "status", "answer", "sources", "outcome", "done"]
+    assert events[1].data == {"code": "guardrail_passed", "message": "Guardrail passed"}
+    assert events[4].data["sources"][0]["source_type"] == "live_arxiv"
+    assert events[0].data["cache_status"] == "miss"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"event: reasoning\ndata: {}\n\n",
+        b"event: status\ndata: not-json\n\n",
+        b"event: status\ndata: []\n\n",
+        b"event: answer\n\n",
+    ],
+)
+def test_parser_rejects_malformed_agent_events(payload: bytes) -> None:
+    with pytest.raises(SSEProtocolError):
+        JSONSSEParser().feed(payload)
+
+
+@pytest.mark.anyio
+async def test_agent_client_posts_to_the_agent_stream_endpoint_and_stops_at_done() -> None:
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads((await request.aread()).decode())
+        chunks = [
+            frame("metadata", {"cache_status": "hit"}),
+            frame("status", {"code": "cache_hit", "message": "Validated cached answer found"}),
+            frame("answer", {"text": "Grounded [S1]."}) + frame("sources", {"sources": []}),
+            frame("done", {"outcome": "answered"}),
+            frame("status", {"code": "late", "message": "never delivered"}),
+        ]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChunkStream(chunks))
+
+    client = AgentStreamClient(base_url="http://api.test/", transport=httpx.MockTransport(handler))
+
+    events = [event async for event in client.stream("  question  ")]
+
+    assert seen == {"url": "http://api.test/api/v1/agent/ask/stream", "body": {"question": "question"}}
+    assert [event.event for event in events] == ["metadata", "status", "answer", "sources", "done"]
+    assert client.timeout.read == 240.0
+    assert RAGStreamClient(base_url="http://api.test").endpoint == "http://api.test/api/v1/ask/stream"
+
+
+@pytest.mark.anyio
+async def test_agent_client_treats_error_as_terminal_and_maps_timeout_status() -> None:
+    def errored(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            frame("metadata", {"cache_status": "miss"}),
+            frame("status", {"code": "graph_started", "message": "Request accepted"}),
+            frame("error", {"code": "timeout", "message": "The research assistant took too long."}),
+        ]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChunkStream(chunks))
+
+    events = [
+        event
+        async for event in AgentStreamClient(base_url="http://api.test", transport=httpx.MockTransport(errored)).stream("q")
+    ]
+    assert [event.event for event in events] == ["metadata", "status", "error"]
+
+    gateway = AgentStreamClient(
+        base_url="http://api.test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(504, text="internal secret traceback")),
+    )
+    with pytest.raises(RAGUIClientError, match="took too long") as caught:
+        _ = [event async for event in gateway.stream("q")]
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.anyio
+async def test_agent_client_rejects_a_stream_that_ends_after_statuses_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [frame("metadata", {"cache_status": "miss"}), frame("status", {"code": "x", "message": "Working"})]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChunkStream(chunks))
+
+    client = AgentStreamClient(base_url="http://api.test", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(IncompleteStreamError):
+        _ = [event async for event in client.stream("q")]
+
+
+@pytest.mark.anyio
+async def test_agent_client_maps_connection_failure_without_details() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private host detail")
+
+    client = AgentStreamClient(base_url="http://api.test", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(RAGUIClientError, match="unavailable") as caught:
+        _ = [event async for event in client.stream("q")]
+    assert "private host detail" not in str(caught.value)
