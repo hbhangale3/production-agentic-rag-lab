@@ -1,78 +1,349 @@
-# The Mother of AI Project
-## Phase 1 RAG Systems: arXiv Paper Curator
+# Production Agentic RAG
 
-<div align="center">
-  <h3>A Learner-Focused Journey into Production RAG Systems</h3>
-  <p>Learn to build modern AI systems from the ground up through hands-on implementation</p>
-  <p>Master the most in-demand AI engineering skills: <strong>RAG (Retrieval-Augmented Generation)</strong></p>
-</div>
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1C3C3C)
+![OpenSearch](https://img.shields.io/badge/OpenSearch-2.19-005EB8?logo=opensearch&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-2.10-017CEE?logo=apacheairflow&logoColor=white)
+![Gradio](https://img.shields.io/badge/Gradio-6-F97316)
+![Docker Compose](https://img.shields.io/badge/Docker%20Compose-2496ED?logo=docker&logoColor=white)
+![Groq](https://img.shields.io/badge/Groq-LLM-F55036)
+![Langfuse](https://img.shields.io/badge/Langfuse-observability-6D28D9)
+![Docling](https://img.shields.io/badge/Docling-PDF%20parsing-0F766E)
+
+A production-style research intelligence system that combines local-first hybrid
+retrieval, evidence sufficiency grading, bounded live arXiv fallback, grounded
+generation, semantic validation, caching, observability, and a recruiter-facing
+Gradio interface.
+
+## Live Demo
+
+### [Open the live Production Agentic RAG demo](https://agenticrag.hbapps.dedyn.io)
+
+<https://agenticrag.hbapps.dedyn.io> — ask a research question about AI, machine
+learning, or healthcare AI, or click one of the example questions.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python Version">
-  <img src="https://img.shields.io/badge/FastAPI-0.115+-green.svg" alt="FastAPI">
-  <img src="https://img.shields.io/badge/OpenSearch-2.19-orange.svg" alt="OpenSearch">
-  <img src="https://img.shields.io/badge/Docker-Compose-blue.svg" alt="Docker">
-  <img src="https://img.shields.io/badge/Status-Week%201%20Ready-brightgreen.svg" alt="Status">
+  <img src="static/gui-hero-home.png" alt="Gradio home screen with the question box, example questions, and technology badges" width="900">
 </p>
+<p align="center"><em>Recruiter-facing Gradio interface with example questions, grounded answers, execution metadata, and technology stack.</em></p>
 
-</br>
+## What This System Does
+
+**Builds a local research corpus**
+
+- Ingests research papers from arXiv on a schedule.
+- Parses the PDFs with Docling.
+- Stores canonical paper metadata and parsed text in PostgreSQL.
+- Chunks papers by section and embeds the chunks with `BAAI/bge-small-en-v1.5`.
+- Indexes the chunks in OpenSearch for keyword and vector search.
+
+**Answers questions from evidence**
+
+- Retrieves with BM25 and vector search, fused by Reciprocal Rank Fusion (RRF).
+- Grades whether the retrieved evidence is sufficient to answer.
+- Rewrites the query and retries local retrieval once when it is not.
+- Falls back to live arXiv only when local evidence is still insufficient, and
+  downloads and parses only the few papers it selects.
+- Merges local and live candidates and reranks them on one common BGE relevance scale.
+- Generates an answer that cites the selected evidence.
+
+**Validates before it returns anything**
+
+- Detects a truncated generation and recovers from it once.
+- Validates citation structure, then semantic grounding against the evidence.
+- Regenerates a bounded number of times when grounding fails.
+- Caches only validated answers.
+- Shows safe execution statuses in the UI and records traces in Langfuse.
+
+## Key Capabilities
+
+| Capability | What it means here |
+|---|---|
+| Local-first retrieval | The curated corpus is always searched before anything external |
+| Agentic control | A LangGraph control graph decides whether to answer, rewrite, retry, or fall back |
+| Bounded live fallback | At most 5 live arXiv candidates, at most 2 PDFs processed per request |
+| Common reranking | Local and live evidence are rescored together with one embedding model |
+| Two-stage validation | Structural citation checks, then a semantic grounding grader |
+| Validated cache | Redis stores only complete, structurally valid, grounded answers |
+| Safe transparency | The UI shows workflow statuses, never model reasoning or rejected text |
+| Observability | Langfuse traces, generation observations, prompt versions, token usage |
+| Deployed | HTTPS behind Nginx, Docker Compose under systemd, internal ports on loopback |
+
+## Architecture
 
 <p align="center">
-  <a href="#-about-this-course">
-    <img src="static/mother_of_ai_project_rag_architecture.gif" alt="RAG Architecture" width="700">
-  </a>
+  <img src="static/architecture-overview.png" alt="End-to-end architecture diagram" width="900">
 </p>
+<p align="center"><em>End-to-end architecture covering ingestion, hybrid retrieval, agentic control, live arXiv fallback, validation, caching, and observability.</em></p>
 
-## 📖 About This Course
-
-This is a **learner-focused project** where you'll build a complete research assistant system that automatically fetches academic papers, understands their content, and answers your research questions using advanced RAG techniques.
-
-**The arXiv Paper Curator** will teach you to build a **production-grade RAG system using industry best practices**. You'll master the architecture, implementation, and deployment of AI systems that professionals use in the real world.
-
-By the end of this course, you'll have your own AI research assistant and the skills to build similar systems for any domain.
-
----
-
-## 🤖 Week 7: Agentic RAG
-
-A bounded LangGraph agent answers research questions about AI, machine
-learning, NLP, and healthcare AI. It retrieves from the local corpus, checks
-whether that evidence is sufficient, falls back to live arXiv when it is not,
-and only returns an answer that has passed semantic grounding against the
-exact sources it was written from.
+There are two halves. Offline, Airflow keeps a local corpus current in
+PostgreSQL and OpenSearch. Online, a question enters through Gradio, reaches
+the FastAPI agent endpoint, and is answered from the Redis cache or by a
+LangGraph workflow. The workflow follows one rule set:
 
 ```text
-User -> Gradio -> FastAPI
-  -> resolve prompt bundle -> agent cache lookup (Redis)
-       HIT  -> validated cached answer, graph not run
-       MISS -> LangGraph
-                 guardrail (in scope?)
-                 local hybrid retrieval (BM25 + BGE vectors, RRF)
-                 evidence-sufficiency grader
-                   insufficient -> rewrite query once -> local retry -> grade again
-                   still insufficient -> live arXiv search
-                                         -> select up to 2 papers -> PDF -> Docling -> chunks
-                 normalize local + live evidence -> common BGE rerank -> top sources
-                 grounded generation -> structural citation validation
-                 semantic answer grounding -> regenerate once if it fails
-               -> cache only a grounded, cited answer -> response
+local first
+  -> assess the evidence
+  -> expand only when necessary
+  -> generate from the selected evidence
+  -> validate before returning
+  -> cache only validated output
 ```
 
-Langfuse (optional, metadata-only by default) records every model call as a
-generation with model, token usage, latency, and prompt identity. Redis and
-Langfuse outages never make the agent unavailable.
+## How It Works
 
-**Key technologies:** FastAPI, LangGraph, Groq (via a provider-neutral LLM
-interface), OpenSearch, sentence-transformers BGE embeddings, Docling, Redis,
-Langfuse, PostgreSQL, Airflow, Gradio.
+### Research Ingestion
 
-### Agent endpoints
+```text
+arXiv -> Apache Airflow -> paper acquisition -> Docling PDF parsing -> PostgreSQL
+      -> section-aware chunking -> BAAI/bge-small-en-v1.5 -> OpenSearch
+```
+
+An Airflow DAG runs daily (03:00 by default) over configurable arXiv topic
+profiles. PostgreSQL holds the canonical paper metadata and parsed text.
+OpenSearch holds the chunk documents with a BM25 index and a 384-dimensional
+HNSW vector index. Chunks target 600 words with a 100-word overlap and keep
+their section title.
+
+### Hybrid Retrieval
+
+```text
+BM25 + semantic vector search -> Reciprocal Rank Fusion (RRF) -> top candidates
+```
+
+BM25 preserves keyword precision for names, acronyms, and identifiers.
+Embeddings capture semantic similarity when the wording differs. RRF combines
+the two by rank, so the incompatible raw scores are never compared directly.
+The top candidates go to evidence sufficiency grading.
+
+### Agentic Retrieval and Live Fallback
+
+The agent is a LangGraph stateful control graph: specialized nodes and
+services with bounded conditional execution.
+
+```text
+question -> guardrail -> local hybrid retrieval -> evidence sufficiency grading
+  sufficient          -> rerank -> generate
+  insufficient        -> query rewrite -> one local retry
+  still insufficient  -> live arXiv fallback
+```
+
+The guardrail rejects questions outside the supported research scope. The
+live fallback is the last resort, not a step every query takes:
+
+```text
+live arXiv metadata/abstract search -> bounded paper selection
+  -> selective PDF acquisition -> Docling parse -> transient evidence
+```
+
+Only the selected papers are downloaded. Live evidence is held in memory for
+that request and is not written to the corpus.
+
+### Common Evidence Reranking
+
+Local OpenSearch candidates and live candidates do not have comparable raw
+scores, so they are never ranked against each other directly.
+
+```text
+local candidates + live candidates
+  -> normalize to one evidence representation
+  -> BGE semantic rerank against the original question
+  -> final evidence set (up to 5 sources, labeled [S1]..[Sn])
+```
+
+Every candidate is rescored with the same embedding model, and only that
+score orders the final evidence.
+
+### Grounded Generation and Validation
+
+```text
+final evidence -> Groq LLM -> finish-reason check
+  -> structural citation validation -> semantic answer grounding -> response
+```
+
+The deployment runs `openai/gpt-oss-120b` on Groq, set with `GROQ_MODEL`.
+
+| Check | What it verifies |
+|---|---|
+| Structural validation | Citation labels exist, every label refers to a supplied source, and the answer contract is valid |
+| Semantic grounding | A grader confirms the completed answer remains supported by the exact evidence supplied |
+
+**Length recovery.** If the provider returns `finish_reason=length`, the
+partial answer is not shown, not graded, and not cached. One regeneration is
+attempted with a larger, capped token allowance, reusing the same question,
+evidence, and source labels. Validation then runs only on the completed
+result.
+
+**Grounding regeneration.** If a complete, structurally valid answer fails
+semantic grounding, it is regenerated from the same evidence and validated
+again, for at most two grounding attempts in total.
+
+Length recovery and grounding regeneration are separate mechanisms with
+separate bounds. Nothing loops without a limit; when the bounds are exhausted
+the user gets a fixed safe message instead of an unvalidated answer.
+
+### Validated Response Caching
+
+Redis is an exact-match cache keyed as `rag:agent-response:v1:<sha256>`. The
+hash covers the state that can change an answer: the normalized question,
+corpus identity, retrieval settings, embedding identity, agent settings,
+prompt identities, and generation and recovery settings. Changing any of
+them produces a new key instead of a stale answer.
+
+| Event | Behavior |
+|---|---|
+| HIT | The validated cached response is returned directly; the graph does not run |
+| MISS | The graph executes |
+| WRITE | Only after a complete, structurally valid, semantically grounded answer |
+
+Truncated, failed, and ungrounded answers are never cached. The default TTL
+is 24 hours (`RAG_CACHE_TTL_SECONDS=86400`). A Redis outage never fails a
+request.
+
+## Recruiter-Facing Gradio UI
+
+<p align="center">
+  <img src="static/gui-answer-and-execution-path.png" alt="A validated answer with summary badges and the execution path" width="900">
+</p>
+<p align="center"><em>Validated answer with cache state, grounding status, latency, token usage, and safe execution-path events.</em></p>
+
+- Public HTTPS interface with four clickable example questions.
+- The answer rendered as Markdown with its `[S1]` citations.
+- A summary row: `CACHE HIT` / `MISS` / `BYPASS`, grounding status, latency,
+  model, source count, and token usage.
+- An execution timeline of the statuses the backend streamed, in order.
+- `Clear` resets the question and every response panel.
+- Responsive layout that works in light and dark themes.
+
+The execution path shows safe workflow statuses such as "Evidence
+insufficient" or "Query rewritten". It is not model chain-of-thought, and
+the UI never renders rejected or partial model output.
+
+### Evidence and Sources
+
+<p align="center">
+  <img src="static/gui-sources-section.png" alt="Source cards with citation labels and source-type badges" width="900">
+</p>
+<p align="center"><em>Structured evidence cards with citation IDs, source type, paper metadata, and arXiv links.</em></p>
+
+Each source card shows the citation label, a `LOCAL` or `LIVE ARXIV` badge,
+the title, arXiv ID, section, publication date, a link where one is
+available, and an expandable excerpt of the evidence. Sources are chunks, so
+several chunks from one paper appear as separate cards.
+
+### In-App Architecture Walkthrough
+
+<p align="center">
+  <img src="static/gui-how-it-works-diagram.png" alt="The expanded How this system works section with the architecture diagram" width="900">
+</p>
+<p align="center"><em>The public UI includes a collapsible architecture walkthrough so users can see how retrieval, live fallback, generation, and validation fit together.</em></p>
+
+A collapsed "How this system works" section holds a four-step explanation and
+the architecture diagram, with a fullscreen view. It lets a technical
+reviewer understand the system without crowding the query interface.
+
+## Technology Stack
+
+| Area | Technology |
+|---|---|
+| Application | Python 3.12, FastAPI, Gradio 6, LangGraph |
+| Retrieval | OpenSearch 2.19 (BM25, HNSW vectors), RRF, `BAAI/bge-small-en-v1.5` (384-d) |
+| Data | PostgreSQL 16, Redis 7 |
+| Ingestion | Apache Airflow 2.10, arXiv API, Docling |
+| LLM | Groq, `openai/gpt-oss-120b` |
+| Observability | Langfuse |
+| Infrastructure | Docker Compose, Nginx, Let's Encrypt / Certbot, systemd, deSEC DNS |
+| Development | uv, pytest, Ruff |
+
+## Docker Services
+
+One Compose project (`compose.yml`) runs seven persistent services, all with
+`restart: unless-stopped`.
+
+| Service | Role | Host binding | Container port | Public? | Health check |
+|---|---|---|---|---|---|
+| `api` | FastAPI agent API | `127.0.0.1:8000` | 8000 | No | `GET /api/v1/health` |
+| `gradio` | Demo UI (same image as `api`) | `127.0.0.1:7860` | 7860 | Via Nginx only | HTTP `GET /` |
+| `airflow` | Ingestion scheduler and webserver | `127.0.0.1:8080` | 8080 | No | `/health`: metadata DB and scheduler |
+| `postgres` | Paper metadata, parsed text, Airflow metadata | `127.0.0.1:5432` | 5432 | No | `pg_isready` |
+| `redis` | Validated response cache | `127.0.0.1:6379` | 6379 | No | `redis-cli ping` |
+| `opensearch` | Chunk index: BM25 and vectors | `127.0.0.1:9200`, `127.0.0.1:9600` | 9200, 9600 | No | `/_cluster/health` |
+| `opensearch-dashboards` | Index inspection | `127.0.0.1:5601` | 5601 | No | `/api/status` |
+
+Every application and infrastructure port is bound to the host loopback.
+
+## Network / Port Architecture
+
+| Scope | Ports |
+|---|---|
+| Public | 22 (SSH), 80 (redirect to HTTPS, ACME), 443 (HTTPS) |
+| Loopback only | 7860, 8000, 8080, 5601, 9200, 9600, 5432, 6379 |
+
+Nginx is the only application-level public ingress, and it proxies only to
+Gradio. Gradio calls the API over the Compose network at `http://api:8000`;
+it never uses the public hostname for backend calls. To reach a private tool
+on a server, use an SSH tunnel, for example
+`ssh -L 8080:127.0.0.1:8080 <host>` for Airflow.
+
+## Quick Start
+
+Requirements: Docker with Compose, [uv](https://docs.astral.sh/uv/), and a
+Groq API key for generation.
+
+```bash
+git clone https://github.com/hbhangale3/production-agentic-rag-lab.git
+cd production-agentic-rag-lab
+
+cp .env.example .env        # then set GROQ_API_KEY
+uv sync
+
+docker compose up -d --build
+docker compose ps
+
+curl http://127.0.0.1:8000/api/v1/ping
+curl http://127.0.0.1:8000/api/v1/health
+```
+
+Then open <http://127.0.0.1:7860>. The first build is slow because the image
+includes the embedding and PDF-parsing dependencies. Answering a question
+requires valid Groq credentials, and the corpus is empty until the Airflow
+ingestion DAG (`airflow/dags/arxiv_paper_ingestion.py`) has run.
+
+## Configuration
+
+`.env.example` is the authoritative reference for every setting. Keep real
+keys in `.env`, which is not committed.
+
+| Group | Settings |
+|---|---|
+| LLM | `GROQ_API_KEY`, `GROQ_MODEL`, `LLM_MAX_COMPLETION_TOKENS`, `LLM_LENGTH_RECOVERY_MAX_TOKENS`, `LLM_TEMPERATURE` |
+| Retrieval | `OPENSEARCH_HOST`, `OPENSEARCH_CHUNK_INDEX_NAME`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`, `RAG_RETRIEVAL_SIZE`, `CHUNK_TARGET_WORDS` |
+| Agent | `AGENT_REQUEST_TIMEOUT_SECONDS`, `AGENT_LIVE_PAPER_TIMEOUT_SECONDS`, `AGENT_LIVE_ARXIV_TIMEOUT_SECONDS`, `AGENT_LIVE_ARXIV_MAX_RETRIES` |
+| Redis | `REDIS_ENABLED`, `REDIS_URL`, `RAG_CACHE_TTL_SECONDS`, `RAG_CORPUS_GENERATION` |
+| Langfuse | `LANGFUSE_ENABLED`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_PROMPT_MANAGEMENT_ENABLED`, `LANGFUSE_CAPTURE_CONTENT` |
+| Ingestion | `ARXIV_INGESTION_PROFILES`, `ARXIV_INGESTION_SCHEDULE`, `ARXIV_INGESTION_BATCH_SIZE` |
+
+The model in `.env.example` is `llama-3.3-70b-versatile`; the deployment sets
+`GROQ_MODEL=openai/gpt-oss-120b`. Redis and Langfuse are off until enabled.
+The agent's decision bounds (evidence and grounding thresholds, one local
+retry, two grounding attempts, live paper limits) are code-level defaults in
+`src/services/agent/config.py`. Bump `RAG_CORPUS_GENERATION` after a corpus
+change that should invalidate cached answers.
+
+## API
+
+All routes are under `/api/v1`. The API is not exposed publicly; these
+examples run on the host.
+
+### Agent Endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/agent/ask` | One JSON response: answer, sources, cache status, outcome |
-| `POST /api/v1/agent/ask/stream` | Server-sent events: safe execution statuses, then the validated answer |
-| `POST /api/v1/ask`, `POST /api/v1/ask/stream` | The Week 5/6 single-pass RAG endpoints, unchanged |
+| `POST /api/v1/agent/ask` | One JSON response: answer, sources, cache status, outcome, execution statuses |
+| `POST /api/v1/agent/ask/stream` | Server-sent events: statuses as they happen, then the validated answer |
 
 ```bash
 curl -s http://127.0.0.1:8000/api/v1/agent/ask \
@@ -80,342 +351,262 @@ curl -s http://127.0.0.1:8000/api/v1/agent/ask \
   -d '{"question": "How can AI improve healthcare access for underserved populations?"}'
 ```
 
-The response reports `outcome` as `answered`, `out_of_scope`,
-`insufficient_evidence`, `grounding_failed`, or `generation_failed`. A model-written answer is
-returned only for `answered`; the stream never emits an answer before it has
-passed grounding, and it never exposes model reasoning.
+`outcome` is one of `answered`, `out_of_scope`, `insufficient_evidence`,
+`grounding_failed`, or `generation_failed`. A model-written answer is
+returned only for `answered`; the others carry a fixed safe message.
 
-### Run it locally
+### Streaming Events
+
+| Event | Content |
+|---|---|
+| `metadata` | Cache status and pipeline version |
+| `status` | One safe execution status (code and message) |
+| `answer` | The full validated answer text |
+| `sources` | The sources the answer cites |
+| `outcome` | A non-answer outcome with its safe message |
+| `done` | Final outcome, grounding result, model, token counts |
+| `error` | A safe error code and message |
+
+The answer is emitted once, only after validation succeeds. The stream does
+not carry raw model tokens, so nothing unvalidated reaches the client.
+
+### Health Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/ping` | Liveness |
+| `GET /api/v1/health` | Database status and cache status with hit/miss counters |
+
+Lower-level routes remain available for inspection and are not the primary
+path: `POST /api/v1/hybrid-search`, `GET /api/v1/search/*` (BM25 variants),
+`GET /api/v1/papers/{arxiv_id}`, and the single-pass RAG routes
+`POST /api/v1/ask` and `/api/v1/ask/stream`.
+
+## Observability
+
+Langfuse support is optional and off by default.
+
+- A trace per request with spans for the graph's nodes.
+- A Generation observation for every model call, with model, provider,
+  latency, and token usage.
+- Prompt identity and version linked to the generations that used them, with
+  optional Langfuse-managed prompts and local prompts as the fallback.
+- Cost, when token prices are configured.
+- Safe metadata only: content capture is disabled unless
+  `LANGFUSE_CAPTURE_CONTENT=true`.
+
+Tracing fails open. A Langfuse outage or misconfiguration never changes an
+answer and never fails a request.
+
+## Production Deployment
+
+Public URL: <https://agenticrag.hbapps.dedyn.io>
+
+```text
+Internet -> deSEC DNS -> Nginx (80/443) -> Gradio (127.0.0.1:7860)
+         -> FastAPI (Compose network) -> PostgreSQL, OpenSearch, Redis
+```
+
+### Nginx + HTTPS
+
+Host-level Nginx terminates TLS with a Let's Encrypt certificate and proxies
+only to Gradio. HTTP redirects permanently to HTTPS. `certbot.timer` renews
+the certificate and a deploy hook reloads Nginx. Response buffering is off so
+status events arrive as they happen, and proxy timeouts are 600 seconds so a
+long agent run is ended by the application, not the proxy. The configuration
+and installer are in `deploy/nginx/`.
+
+### systemd
+
+| Unit | Owns |
+|---|---|
+| `docker.service` | The Docker daemon |
+| `production-agentic-rag.service` | The Compose stack: starts it at boot and waits for every service to be healthy |
+| `nginx.service` | The reverse proxy, independently of the stack, with `Restart=on-failure` |
 
 ```bash
-docker compose up -d --build               # the whole stack, including the Gradio UI
-curl http://127.0.0.1:8000/api/v1/health   # API
-# Gradio UI: http://127.0.0.1:7860
+sudo systemctl start production-agentic-rag.service
+sudo systemctl stop production-agentic-rag.service
+sudo systemctl restart production-agentic-rag.service
+sudo systemctl status production-agentic-rag.service
+sudo systemctl status nginx
 ```
 
-One Compose project runs PostgreSQL, Redis, OpenSearch, OpenSearch
-Dashboards, Airflow, the API, and Gradio. Every port is published on
-`127.0.0.1` only, and every service restarts unless stopped. Gradio runs the
-API image and calls the API over the Compose network (`http://api:8000`).
+### Docker Compose
 
-The demo is public at <https://agenticrag.hbapps.dedyn.io>.
+Compose owns dependency order, health checks, restart policies, networking,
+and volumes. Gradio and the API share one image, so a code change is one
+rebuild: `docker compose build gradio && docker compose up -d --wait`.
 
-<p align="center">
-  <img src="static/week7_gradio_ui.png" alt="Gradio demo showing a grounded answer, summary badges, the execution path, and source cards" width="800">
-</p>
+Deployment details are in
+[docs/week7-m11-compose-stack-autostart.md](docs/week7-m11-compose-stack-autostart.md)
+and
+[docs/week7-m12-nginx-https-reverse-proxy.md](docs/week7-m12-nginx-https-reverse-proxy.md).
 
-It shows the validated answer, a one-line summary (`CACHE HIT`/`MISS`,
-`GROUNDED`, latency, model, source count, tokens), the execution path as the
-backend reported it, and one card per source labeled `LOCAL` or
-`LIVE ARXIV`. A collapsed "How this system works" section holds the
-architecture diagram:
+## Project Structure
 
-<p align="center">
-  <img src="src/assets/architecture/production-agentic-rag-final.png" alt="Production Agentic RAG architecture: offline ingestion, online agent query path, validation, caching, observability" width="900">
-</p>
+```text
+production-agentic-rag-lab/
+├── airflow/            # Airflow image, entrypoint, ingestion DAGs
+├── deploy/
+│   ├── nginx/          # reverse-proxy config and installer
+│   └── systemd/        # Compose stack unit
+├── docs/               # design notes and acceptance records
+├── scripts/            # manual search API checks
+├── src/
+│   ├── assets/         # architecture diagram shown in the UI
+│   ├── routers/        # FastAPI routes
+│   ├── schemas/        # request and response models
+│   ├── services/       # agent, retrieval, embeddings, LLM, cache, observability
+│   ├── gradio_app.py   # demo UI
+│   ├── gradio_client.py
+│   └── main.py         # FastAPI application
+├── static/             # README images
+├── tests/              # unit, API, and integration tests
+├── compose.yml
+├── Dockerfile
+├── pyproject.toml
+└── README.md
+```
 
-The system searches the local corpus first, rewrites the query and falls
-back to live arXiv only when the evidence is insufficient, reranks all
-evidence on one embedding scale, and validates the cited answer structurally
-and semantically before returning or caching it. The diagram lives in
-`src/assets/architecture/` (inside `src/` so the Docker image includes it);
-UI notes are in `docs/week7-m13-ui-polish-architecture.md`.
-
-On a server, one systemd unit starts the stack at boot
-(`deploy/systemd/production-agentic-rag.service`):
+## Testing
 
 ```bash
-sudo systemctl start|stop|restart|status production-agentic-rag.service
-docker compose ps -a
-docker compose logs --tail=200 <service>
+env -u DEBUG \
+  REDIS_ENABLED=false \
+  LANGFUSE_ENABLED=false \
+  uv run pytest -q
 ```
 
-Design notes for each milestone are in `docs/week7-m01-*.md` through
-`docs/week7-m10-agent-api-gradio-acceptance.md`; the stack, ports, and
-autostart are in `docs/week7-m11-compose-stack-autostart.md`.
-
-Host-level Nginx is the only public entry point. It terminates HTTPS for
-<https://agenticrag.hbapps.dedyn.io> and proxies to Gradio on
-`127.0.0.1:7860`; the API and every other service stay private. The config
-and installer are in `deploy/nginx/`, and DNS, certificates, timeouts, and
-troubleshooting are in `docs/week7-m12-nginx-https-reverse-proxy.md`.
-
----
-
-## 🚀 Quick Start
-
-### Week 6 RAG demo
-
-The FastAPI RAG endpoints support optional exact-response Redis caching shared
-between `/api/v1/ask` and `/api/v1/ask/stream`. The Gradio client displays the
-authoritative per-request cache outcome, total response time, and safe pipeline
-metadata. Cache health and process-local counters are available from
-`/api/v1/health`.
-
-Langfuse observability is optional and metadata-only by default. Redis or
-Langfuse outages do not make the core RAG path unavailable. Configure the
-optional services through the documented `REDIS_*`, `RAG_CACHE_*`, and
-`LANGFUSE_*` values in `.env.example`; credentials are not required when they
-are disabled.
-
-Run the API and demo locally with:
+Current baseline: 2101 passed, 10 warnings. The suite runs without Redis or
+Langfuse.
 
 ```bash
-uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
-RAG_API_BASE_URL=http://127.0.0.1:8001 uv run python -m src.gradio_app
+uv run ruff check .
+git diff --check
+uv lock --check
 ```
 
-The Gradio demo now calls the Week 7 agent endpoint and defaults to the Docker
-API at `http://127.0.0.1:8000`; set `RAG_API_BASE_URL` to point it elsewhere.
-
-### **📋 Prerequisites**
-- **Docker Desktop** (with Docker Compose)  
-- **Python 3.12+**
-- **UV Package Manager** ([Install Guide](https://docs.astral.sh/uv/getting-started/installation/))
-- **8GB+ RAM** and **20GB+ free disk space**
-
-### **⚡ Get Started**
+## Operations
 
 ```bash
-# 1. Clone and setup
-git clone <repository-url>
-cd zero_to_RAG
-uv sync
+docker compose up -d                 # start
+docker compose up -d --build         # rebuild and start
+docker compose ps
+docker compose logs -f api
+docker compose logs -f gradio
+docker compose logs -f airflow
+docker compose stop                  # stop, keeping containers and data
 
-# 2. Start all services
-docker compose up --build -d
+curl http://127.0.0.1:8000/api/v1/ping
+curl http://127.0.0.1:8000/api/v1/health
 
-# 3. Verify everything works
-curl http://localhost:8000/health
+systemctl status production-agentic-rag.service
+systemctl status nginx
+systemctl status certbot.timer
+sudo nginx -t
 ```
 
-### **📊 Access Your Services**
+Do not use `docker compose down -v` as a routine command: it deletes the
+PostgreSQL, OpenSearch, Redis, and Airflow volumes.
 
-| Service | URL | Purpose |
-|---------|-----|---------|
-| **API Documentation** | http://localhost:8000/docs | Interactive API testing |
-| **Airflow Dashboard** | http://localhost:8080 | Workflow management |
-| **OpenSearch Dashboards** | http://localhost:5601 | Hybrid search engine UI |
+## Key Design Decisions
 
-#### **NOTE**: Default Airflow credentials are **username**: `admin`, **password**: `admin`
----
+### Local-first retrieval
 
-## 📚 Learning Materials
+Curated local evidence is preferred. External search costs time and is used
+only when the local corpus cannot support an answer.
 
-### **📓 Week 1: Complete Setup Guide**
-**Start here!** Follow our comprehensive setup notebook:
-Please run it in terminal
+### Hybrid search
 
-```bash
-# Launch the Week 1 notebook
-uv run jupyter notebook notebooks/week1/week1_setup.ipynb
+BM25 and vectors together, fused by rank, instead of vector-only retrieval.
+
+### Common reranking
+
+Local and live evidence are rescored on one BGE scale instead of trusting
+scores from different systems.
+
+### Validation before caching
+
+Only validated answers enter Redis, so a cache hit is as trustworthy as a
+fresh answer.
+
+### Bounded control flow
+
+One local retry, one length recovery, two grounding attempts, capped live
+papers, and a request timeout. There are no uncontrolled retries.
+
+### Safe transparency
+
+The UI and API expose workflow statuses, not chain-of-thought.
+
+## Production Safety Properties
+
+- Internal services are bound to loopback; Nginx is the only public ingress.
+- Public traffic is HTTPS, with HTTP redirected.
+- Incomplete generations are never exposed and never cached.
+- Ungrounded outputs are never cached.
+- Structural citation validation and semantic grounding run on every answer.
+- Every retry and fallback is bounded.
+- The cache identity includes prompts and answer-affecting configuration.
+- Langfuse content capture is off by default.
+- Execution statuses are fixed, safe strings.
+
+These reduce risk; they are not a claim of complete security. See the
+limitations below.
+
+## Example Execution Paths / Performance
+
+```text
+A. Cache hit
+   question -> Redis HIT -> validated response
+
+B. Local evidence sufficient
+   question -> guardrail -> local hybrid retrieval -> evidence sufficient
+            -> rerank -> generate -> validate -> cache
+
+C. Adaptive live fallback
+   question -> local retrieval -> insufficient -> rewrite -> local retry
+            -> insufficient -> live arXiv -> PDF + Docling
+            -> common BGE rerank -> generate -> validate -> cache
 ```
 
-**What you'll learn in Week 1:**
-- Complete infrastructure setup with Docker Compose
-- FastAPI development with automatic documentation and health checks
-- PostgreSQL database configuration and management
-- OpenSearch hybrid search engine setup
-- Ollama local LLM service configuration
-- Service orchestration and health monitoring
-- Professional development environment with code quality tools
+Observed in acceptance testing on a 6-core, CPU-only VPS. These are single
+measurements, not guarantees.
 
-### **🏗️ Week 1 Infrastructure Architecture**
+| Path | Observed |
+|---|---|
+| Cache hit | Single-digit milliseconds server-side |
+| Local generation | About 79 s in one run |
+| Live fallback with PDF and Docling | About 198 s in one run |
 
-<p align="center">
-  <img src="static/week1_infra_setup.png" alt="Week 1 Infrastructure Setup" width="800">
-</p>
+## Known Limitations
 
-**Week 1 Infrastructure Components:**
-- **FastAPI**: REST endpoints with async support (Port 8000)  
-- **PostgreSQL 16**: Paper metadata storage (Port 5432)
-- **OpenSearch 2.19**: Search engine with dashboards (Ports 9200, 5601)
-- **Apache Airflow 2.10**: Workflow orchestration (Port 8080)
-- **Ollama 0.11**: Local LLM server (Port 11434)
+- Groq quota and rate limits apply to every uncached question.
+- The public UI has no authentication or rate limiting.
+- The cache is exact-match, not semantic: a reworded question is a miss.
+- Several chunks from one paper appear as separate source cards.
+- Single-node OpenSearch reports yellow because replicas cannot be placed.
+- Live Docling processing is CPU- and memory-intensive, and a live fallback
+  can take minutes.
+- The Airflow container runs the webserver and scheduler together.
+- There is no conversation memory; each question is independent.
+- The current VPS has no swap.
+- Development credentials for PostgreSQL and Airflow are defaults in the
+  Compose setup; they are reachable only from the host.
 
-### **📖 Week 1 Blog Post**
-[The Infrastructure That Powers RAG Systems](https://jamwithai.substack.com/p/the-infrastructure-that-powers-rag) - Detailed walkthrough and production insights.
+## Troubleshooting
 
----
+| Symptom | Check |
+|---|---|
+| A service is unhealthy | `docker compose ps -a`, then `docker compose logs --tail=200 <service>` |
+| The stack did not start at boot | `systemctl status production-agentic-rag.service` |
+| 502 from the public URL | Gradio is down or still starting: `curl -I http://127.0.0.1:7860/` |
+| Nginx will not reload | `sudo nginx -t`, then `systemctl status nginx` |
+| Certificate problems | `systemctl status certbot.timer`, then `sudo certbot renew --dry-run` |
+| No `LOCAL` sources ever appear | The corpus is empty; run the Airflow ingestion DAG |
+| Answers fail after retrieval | Check `GROQ_API_KEY` and Groq quota in `docker compose logs api` |
 
-## 🛠️ Technology Stack
+## License
 
-| Service | Purpose | Status |
-|---------|---------|--------|
-| **FastAPI** | REST API with automatic docs | ✅ Ready |
-| **PostgreSQL 16** | Paper metadata and content storage | ✅ Ready |
-| **OpenSearch 2.19** | Hybrid search engine | ✅ Ready |
-| **Apache Airflow 2.10** | Workflow automation | ✅ Ready |
-| **Ollama 0.11** | Local LLM serving | ✅ Ready |
-
-**Development Tools:** UV, Ruff, MyPy, Pytest, Docker Compose
-
----
-
-## 🎯 What You're Building
-
-### **Week 1: Infrastructure Foundation** ✅
-- Multi-service architecture using Docker Compose
-- REST API with health monitoring and documentation
-- Database setup with proper schema design
-- Search engine configuration for future RAG features
-- Professional development environment
-
-### **Future Weeks: Complete RAG System** (6-Week Course)
-- **Week 2:** arXiv API integration, PDF parsing with Docling, automated data ingestion
-- **Week 3:** OpenSearch hybrid search implementation with BM25 + semantic vectors
-- **Week 4:** Context-aware chunking and retrieval evaluation with nDCG metrics
-- **Week 5:** Full RAG pipeline with LLM integration and prompt optimization
-- **Week 6:** Observability with Langfuse, A/B testing, and production deployment
-
----
-
-## 🏗️ Project Structure (Week 1)
-
-```
-zero_to_RAG/
-├── src/                       # Main application code
-│   ├── main.py                # FastAPI application
-│   ├── routers/               # API endpoints
-│   ├── models/                # Database models (SQLAlchemy)
-│   ├── repositories/          # Data access layer
-│   ├── schemas/               # Pydantic validation schemas
-│   ├── services/              # Business logic
-│   ├── db/                    # Database configuration
-│   ├── config.py              # Environment configuration
-│   └── dependencies.py        # Dependency injection
-│
-├── notebooks/week1/           # Learning materials
-│   └── week1_setup.ipynb      # Complete setup guide
-│
-├── tests/                     # Comprehensive test suite
-├── airflow/dags/              # Workflow definitions
-├── static/                    # Assets (images, GIFs)
-└── compose.yml                # Service orchestration
-```
-
----
-
-## 🔧 Essential Commands
-
-### **Using the Makefile** (Recommended)
-```bash
-# View all available commands
-make help
-
-# Quick workflow
-make start         # Start all services
-make health        # Check all services health
-make test          # Run tests
-make stop          # Stop services
-```
-
-### **All Available Commands**
-| Command | Description |
-|---------|-------------|
-| `make start` | Start all services |
-| `make stop` | Stop all services |
-| `make restart` | Restart all services |
-| `make status` | Show service status |
-| `make logs` | Show service logs |
-| `make health` | Check all services health |
-| `make setup` | Install Python dependencies |
-| `make format` | Format code |
-| `make lint` | Lint and type check |
-| `make test` | Run tests |
-| `make test-cov` | Run tests with coverage |
-| `make clean` | Clean up everything |
-
-### **Direct Commands** (Alternative)
-```bash
-# If you prefer using commands directly
-docker compose up --build -d    # Start services
-docker compose ps               # Check status
-docker compose logs            # View logs
-uv run pytest                 # Run tests
-```
-
-### Manual BM25 API Demo
-
-With FastAPI and OpenSearch running, execute:
-
-```bash
-uv run python scripts/test_bm25_search_apis.py
-```
-
-The script calls all seven Week 3 search endpoints over HTTP using real indexed papers and prints up to five ranked results per strategy. Set `API_BASE_URL` or `RESULT_SIZE` to override the defaults. It is a manual learning, demonstration, and integration-validation tool; it is intentionally outside the normal pytest suite.
-
-### Week 5 Grounded RAG Demo
-
-Week 5 provides grounded JSON and SSE APIs plus a local Gradio presentation layer.
-Start FastAPI and Gradio in separate terminals:
-
-```bash
-OPENSEARCH_HOST=http://127.0.0.1:9200 \
-  uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
-
-RAG_API_BASE_URL=http://127.0.0.1:8001 \
-  uv run python -m src.gradio_app
-```
-
-Open <http://127.0.0.1:7860>. The UI consumes the real streaming endpoint; it
-does not call Groq or retrieval services directly. See
-[the final Week 5 guide](docs/week5-m08-final.md) for architecture, API contracts,
-limitations, and safe SSH-tunnel instructions.
-
----
-
-## 🎓 Learning Path
-
-### **Week 1 Success Criteria**
-Complete when you can:
-- [ ] Start all services with `docker compose up -d`
-- [ ] Access API docs at http://localhost:8000/docs  
-- [ ] Login to Airflow at http://localhost:8080
-- [ ] Browse OpenSearch at http://localhost:5601
-- [ ] All tests pass: `uv run pytest`
-
-### **Target Audience**
-| Who | Why |
-|-----|-----|
-| **AI/ML Engineers** | Learn production RAG architecture beyond tutorials |
-| **Software Engineers** | Build end-to-end AI applications with best practices |
-| **Data Scientists** | Implement production AI systems using modern tools |
-
----
-
-## 🛠️ Troubleshooting
-
-**Common Issues:**
-- **Services not starting?** Wait 2-3 minutes, check `docker compose logs`
-- **Port conflicts?** Stop other services using ports 8000, 8080, 5432, 9200
-- **Memory issues?** Increase Docker Desktop memory allocation
-
-**Get Help:**
-- Check the comprehensive Week 1 notebook troubleshooting section
-- Review service logs: `docker compose logs [service-name]`
-- Complete reset: `docker compose down --volumes && docker compose up --build -d`
-
----
-
-## 💰 Cost Structure
-
-**This course is completely free!** You'll only need minimal costs for optional services:
-- **Local Development:** $0 (everything runs locally)
-- **Optional Cloud APIs:** ~$2-5 for external LLM services (if chosen)
-
----
-
-<div align="center">
-  <h3>🎉 Ready to Start Your AI Engineering Journey?</h3>
-  <p><strong>Begin with the Week 1 setup notebook and build your first production RAG system!</strong></p>
-  
-  <p><em>For learners who want to master modern AI engineering</em></p>
-  <p><strong>Built with love by Jam With AI</strong></p>
-</div>
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
