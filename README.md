@@ -398,6 +398,38 @@ Langfuse support is optional and off by default.
 Tracing fails open. A Langfuse outage or misconfiguration never changes an
 answer and never fails a request.
 
+## Observed Production Telemetry
+
+Langfuse telemetry from acceptance and production testing shows a clear split
+between cache-hit traffic and full agentic execution.
+
+| Metric | Observed value |
+|---|---:|
+| Total traces | 135 |
+| Agent traces | 40 |
+| RAG traces | 95 |
+| GPT-OSS-120B tokens observed | 155.63K |
+| Agent request p50 | 0.01 s |
+| Agent request p90 | 1m 44s |
+| Agent request p95 | 2m 58s |
+| Agent request p99 | 3m 14s |
+
+Selected generation observations:
+
+| Stage | p50 | p95 |
+|---|---:|---:|
+| Guardrail | 0.50 s | 1.54 s |
+| Query rewrite | 0.70 s | 2.92 s |
+| Evidence grader | 4.96 s | 37.83 s |
+| Live paper selector | 12.18 s | 13.23 s |
+| Answer grounding | 39.02 s | 42.70 s |
+
+These measurements are observed from the deployed system and are not guaranteed
+benchmarks. The very low overall p50 is influenced by Redis cache hits, while
+the multi-minute tail reflects agentic requests that may perform rewrite,
+live arXiv search, PDF acquisition, Docling parsing, reranking, generation,
+and semantic grounding.
+
 ## Production Deployment
 
 Public URL: <https://agenticrag.hbapps.dedyn.io>
