@@ -9,6 +9,8 @@ import gradio as gr
 from src.gradio_client import AgentStreamClient, RAGStreamClient, RAGUIClientError, SSEEvent
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_SERVER_NAME = "127.0.0.1"
+DEFAULT_SERVER_PORT = 7860
 MAX_EXECUTION_STEPS = 60
 SOURCE_TYPE_LABELS = {"local": "LOCAL", "live_arxiv": "LIVE ARXIV"}
 OUTCOME_STATUS = {
@@ -280,8 +282,22 @@ def _cache_status(value: object) -> str | None:
     return value if value in {"hit", "miss", "bypass", "failure"} else None
 
 
+def server_binding() -> tuple[str, int]:
+    """Loopback by default; a container sets GRADIO_SERVER_NAME=0.0.0.0 to be reachable on its network."""
+    host = os.getenv("GRADIO_SERVER_NAME", "").strip() or DEFAULT_SERVER_NAME
+    raw_port = os.getenv("GRADIO_SERVER_PORT", "").strip()
+    try:
+        port = int(raw_port) if raw_port else DEFAULT_SERVER_PORT
+    except ValueError as exc:
+        raise ValueError("GRADIO_SERVER_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("GRADIO_SERVER_PORT must be between 1 and 65535")
+    return host, port
+
+
 def main() -> None:
-    build_demo().launch(server_name="127.0.0.1", server_port=7860, share=False)
+    host, port = server_binding()
+    build_demo().launch(server_name=host, server_port=port, share=False)
 
 
 if __name__ == "__main__":

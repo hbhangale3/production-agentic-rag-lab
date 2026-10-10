@@ -88,16 +88,31 @@ passed grounding, and it never exposes model reasoning.
 ### Run it locally
 
 ```bash
-docker compose up -d                       # API on 127.0.0.1:8000, plus OpenSearch, Postgres, Redis
-curl http://127.0.0.1:8000/api/v1/health
-RAG_API_BASE_URL=http://127.0.0.1:8000 uv run python -m src.gradio_app   # UI on 127.0.0.1:7860
+docker compose up -d --build               # the whole stack, including the Gradio UI
+curl http://127.0.0.1:8000/api/v1/health   # API
+# Gradio UI: http://127.0.0.1:7860
 ```
+
+One Compose project runs PostgreSQL, Redis, OpenSearch, OpenSearch
+Dashboards, Airflow, the API, and Gradio. Every port is published on
+`127.0.0.1` only, and every service restarts unless stopped. Gradio runs the
+API image and calls the API over the Compose network (`http://api:8000`).
 
 The Gradio demo shows the answer, its sources (labeled `LOCAL` or
 `LIVE ARXIV`), the execution path, cache HIT/MISS, and response time.
 
+On a server, one systemd unit starts the stack at boot
+(`deploy/systemd/production-agentic-rag.service`):
+
+```bash
+sudo systemctl start|stop|restart|status production-agentic-rag.service
+docker compose ps -a
+docker compose logs --tail=200 <service>
+```
+
 Design notes for each milestone are in `docs/week7-m01-*.md` through
-`docs/week7-m10-agent-api-gradio-acceptance.md`.
+`docs/week7-m10-agent-api-gradio-acceptance.md`; the stack, ports, and
+autostart are in `docs/week7-m11-compose-stack-autostart.md`.
 
 ---
 

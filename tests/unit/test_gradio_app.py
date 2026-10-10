@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 import pytest
+from src import gradio_app
 from src.gradio_app import DemoState, clear_demo, stream_demo
 from src.gradio_client import RAGUIClientError, SSEEvent
 
@@ -383,3 +384,41 @@ async def test_agent_length_recovery_shows_the_safe_step_and_only_the_final_vali
     assert "The answer will appear here once it has been validated" in updates[recovery_update][0]
     assert f"✓ {recovery}" in updates[-1][3]
     assert sum("Validated answer" in update[0] for update in updates[:answer_update]) == 0
+
+
+def test_server_binding_defaults_to_loopback_and_reads_the_container_environment(monkeypatch) -> None:
+    monkeypatch.delenv("GRADIO_SERVER_NAME", raising=False)
+    monkeypatch.delenv("GRADIO_SERVER_PORT", raising=False)
+    assert gradio_app.server_binding() == ("127.0.0.1", 7860)
+
+    monkeypatch.setenv("GRADIO_SERVER_NAME", "0.0.0.0")
+    monkeypatch.setenv("GRADIO_SERVER_PORT", "7861")
+    assert gradio_app.server_binding() == ("0.0.0.0", 7861)
+
+    monkeypatch.setenv("GRADIO_SERVER_NAME", "  ")
+    monkeypatch.setenv("GRADIO_SERVER_PORT", "")
+    assert gradio_app.server_binding() == ("127.0.0.1", 7860)
+
+
+@pytest.mark.parametrize("port", ["not-a-port", "0", "70000"])
+def test_server_binding_rejects_an_invalid_port(monkeypatch, port: str) -> None:
+    monkeypatch.setenv("GRADIO_SERVER_PORT", port)
+
+    with pytest.raises(ValueError, match="GRADIO_SERVER_PORT"):
+        gradio_app.server_binding()
+
+
+def test_main_launches_on_the_configured_binding_without_a_public_share_link(monkeypatch) -> None:
+    launched = {}
+
+    class FakeDemo:
+        def launch(self, **kwargs) -> None:
+            launched.update(kwargs)
+
+    monkeypatch.setenv("GRADIO_SERVER_NAME", "0.0.0.0")
+    monkeypatch.delenv("GRADIO_SERVER_PORT", raising=False)
+    monkeypatch.setattr(gradio_app, "build_demo", lambda: FakeDemo())
+
+    gradio_app.main()
+
+    assert launched == {"server_name": "0.0.0.0", "server_port": 7860, "share": False}
