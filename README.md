@@ -98,8 +98,28 @@ Dashboards, Airflow, the API, and Gradio. Every port is published on
 `127.0.0.1` only, and every service restarts unless stopped. Gradio runs the
 API image and calls the API over the Compose network (`http://api:8000`).
 
-The Gradio demo shows the answer, its sources (labeled `LOCAL` or
-`LIVE ARXIV`), the execution path, cache HIT/MISS, and response time.
+The demo is public at <https://agenticrag.hbapps.dedyn.io>.
+
+<p align="center">
+  <img src="static/week7_gradio_ui.png" alt="Gradio demo showing a grounded answer, summary badges, the execution path, and source cards" width="800">
+</p>
+
+It shows the validated answer, a one-line summary (`CACHE HIT`/`MISS`,
+`GROUNDED`, latency, model, source count, tokens), the execution path as the
+backend reported it, and one card per source labeled `LOCAL` or
+`LIVE ARXIV`. A collapsed "How this system works" section holds the
+architecture diagram:
+
+<p align="center">
+  <img src="src/assets/architecture/production-agentic-rag-final.png" alt="Production Agentic RAG architecture: offline ingestion, online agent query path, validation, caching, observability" width="900">
+</p>
+
+The system searches the local corpus first, rewrites the query and falls
+back to live arXiv only when the evidence is insufficient, reranks all
+evidence on one embedding scale, and validates the cited answer structurally
+and semantically before returning or caching it. The diagram lives in
+`src/assets/architecture/` (inside `src/` so the Docker image includes it);
+UI notes are in `docs/week7-m13-ui-polish-architecture.md`.
 
 On a server, one systemd unit starts the stack at boot
 (`deploy/systemd/production-agentic-rag.service`):

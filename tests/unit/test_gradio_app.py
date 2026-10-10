@@ -61,7 +61,10 @@ async def test_ui_updates_answer_then_sources_and_marks_done_only_at_terminal() 
     assert "Grounded Paper" in updates[-2][1]
     assert "Validating" in updates[-2][2]
     assert "validation passed" in updates[-1][2]
-    assert "Model: `test-model`" in updates[-1][3]
+    assert "<b>Model</b>test-model" in updates[-1][4]
+    assert "<b>Sources</b>1" in updates[-1][4]
+    assert "<b>Tokens</b>10 in / 4 out" in updates[-1][4]
+    assert "GROUNDED" in updates[-1][4]
     assert client.questions == ["question"]
 
 
@@ -77,11 +80,12 @@ async def test_error_keeps_partial_answer_but_marks_it_unvalidated_and_hides_sou
 
     updates = [update async for update in stream_demo("question", client=client)]
 
-    answer, sources, status, _ = updates[-1]
+    answer, sources, status, _, metadata = updates[-1]
     assert answer == "Partial answer"
     assert "No validated sources" in sources
     assert "unvalidated" in status
     assert "passed" not in status
+    assert "NOT VALIDATED" in metadata and "GROUNDED" not in metadata
 
 
 @pytest.mark.anyio
@@ -102,8 +106,15 @@ def test_state_rejects_invalid_delta_and_sources_payloads() -> None:
         state.apply(SSEEvent("sources", {"sources": "not-a-list"}))
 
 
-def test_clear_resets_all_visible_fields() -> None:
-    assert clear_demo() == ("", "", "", "**Status:** Ready", "")
+def test_clear_resets_the_question_and_every_response_component() -> None:
+    question, answer, sources, status, execution, metadata = clear_demo()
+
+    assert question == ""
+    assert answer == gradio_app.ANSWER_PLACEHOLDER
+    assert "No validated sources" in sources and "rag-source" not in sources.replace("rag-sources", "")
+    assert "Status:</strong> Ready" in status
+    assert "<li>" not in execution
+    assert metadata == ""
 
 
 @pytest.mark.anyio
@@ -138,24 +149,24 @@ async def test_request_details_show_cache_pipeline_and_deterministic_response_ti
 
     updates = [update async for update in stream_demo("question", client=client, clock=lambda: next(ticks))]
 
-    details = updates[-1][3]
-    assert "Cache: **HIT**" in details
-    assert "Response time: `0.18 s`" in details
-    assert "Original prompt tokens: `10`" in details
-    assert "Original completion tokens: `4`" in details
-    assert "Retrieval size: `5`" in details
-    assert "Embedding model: `safe-embedding-model`" in details
-    assert "Embedding dimension: `384`" in details
-    assert "RRF k: `60`" in details
-    assert "Temperature: `0.1`" in details
-    assert "Maximum completion tokens: `1024`" in details
-    assert "Observability: `langfuse (configured)`" in details
+    details = updates[-1][4]
+    assert ">CACHE HIT<" in details
+    assert "<b>Latency</b>180 ms" in details
+    assert "<b>Tokens (original run)</b>10 in / 4 out" in details
+    assert "<b>Sources retrieved</b>2" in details
+    assert "Retrieval size: 5" in details
+    assert "Embedding model: safe-embedding-model" in details
+    assert "Embedding dimension: 384" in details
+    assert "RRF k: 60" in details
+    assert "Temperature: 0.1" in details
+    assert "Maximum completion tokens: 1024" in details
+    assert "Observability: langfuse (configured)" in details
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("cache_status", "label"),
-    [("miss", "MISS"), ("bypass", "BYPASS"), ("failure", "UNAVAILABLE")],
+    [("miss", "CACHE MISS"), ("bypass", "CACHE BYPASS"), ("failure", "CACHE UNAVAILABLE")],
 )
 async def test_cache_outcomes_are_presented_without_changing_request_success(cache_status, label) -> None:
     client = FakeClient(
@@ -170,7 +181,9 @@ async def test_cache_outcomes_are_presented_without_changing_request_success(cac
 
     updates = [update async for update in stream_demo("question", client=client, clock=lambda: next(ticks))]
 
-    assert f"Cache: **{label}**" in updates[-1][3]
+    assert f">{label}<" in updates[-1][4]
+    assert "<b>Latency</b>500 ms" in updates[-1][4]
+    assert "Tokens" not in updates[-1][4] and "Model" not in updates[-1][4]
     assert "validation passed" in updates[-1][2]
 
 
@@ -240,11 +253,15 @@ async def test_agent_statuses_accumulate_in_order_and_answer_appears_only_after_
     execution = final[3]
     positions = [execution.index(f"✓ {status}") for status in statuses]
     assert positions == sorted(positions)
-    assert "**Execution path**" in execution
-    assert "Cache: **MISS**" in execution
-    assert "Response time: `3.80 s`" in execution
-    assert "Model: `test-model`" in execution
-    assert "**Status:** Grounding validation passed" in final[2]
+    assert execution.startswith('<ol class="rag-steps">') and execution.count("<li>") == len(statuses)
+    metadata = final[4]
+    assert ">CACHE MISS<" in metadata and ">GROUNDED<" in metadata
+    assert "<b>Latency</b>3.80 s" in metadata
+    assert "<b>Model</b>test-model" in metadata
+    assert "<b>Sources</b>2" in metadata
+    assert "<b>Tokens</b>100 in / 20 out" in metadata
+    assert updates[answer_update - 1][4].count("rag-badge") == 1  # cache only; no grounding verdict before the end
+    assert "Status:</strong> Grounding validation passed" in final[2]
     assert "Guardrail passed…" in updates[2][2]
 
 
@@ -253,11 +270,33 @@ async def test_agent_sources_distinguish_local_from_live_arxiv_and_escape_conten
     updates = [update async for update in stream_demo("question", client=FakeClient(agent_events()))]
 
     sources = updates[-1][1]
-    assert "### [S1] Local Paper" in sources
-    assert "`LOCAL` · **arXiv:** 2401.00001 · Section: Results" in sources
-    assert "`LIVE ARXIV` · **arXiv:** 2501.00002 · [PDF](https://arxiv.org/pdf/2501.00002v1)" in sources
+    local, live = sources.split("</article>")[:2]
+    assert '<span class="rag-cite">[S1]</span><span class="rag-badge rag-neutral">LOCAL</span>' in local
+    assert "Local Paper" in local and "arXiv: 2401.00001 · Section: Results" in local
+    assert "<a " not in local
+    assert '<span class="rag-cite">[S2]</span><span class="rag-badge rag-info">LIVE ARXIV</span>' in live
+    assert "arXiv: 2501.00002" in live and "Section" not in live
+    assert 'href="https://arxiv.org/pdf/2501.00002v1"' in live and ">Open arXiv</a>" in live
     assert "Live &lt;b&gt;Paper&lt;/b&gt;" in sources and "<b>" not in sources
-    assert sources.count("[PDF](") == 1
+    assert sources.count("<a ") == 1
+    # The excerpt is collapsed, not part of the card face.
+    assert "<details><summary>View source details</summary><p>Local evidence.</p></details>" in local
+
+
+def test_source_cards_show_the_publication_date_and_truncate_long_excerpts() -> None:
+    from src.gradio_app import SOURCE_EXCERPT_CHARS, _render_sources
+
+    rendered = _render_sources(
+        [
+            {**LOCAL_SOURCE, "published_date": "2026-10-02T00:00:00Z", "content": "x" * 5000},
+            {**LOCAL_SOURCE, "published_date": "not-a-date", "content": ""},
+        ]
+    )
+
+    first, second = rendered.split("</article>")[:2]
+    assert "Published: 2026-10-02" in first and "T00:00" not in first
+    assert first.count("x") == SOURCE_EXCERPT_CHARS and "…</p>" in first
+    assert "Published" not in second and "<details>" not in second
 
 
 @pytest.mark.anyio
@@ -267,25 +306,27 @@ async def test_agent_cache_hit_shows_hit_and_a_single_truthful_step() -> None:
 
     updates = [update async for update in stream_demo("question", client=client, clock=lambda: next(ticks))]
 
-    execution = updates[-1][3]
-    assert "Cache: **HIT**" in execution
-    assert "Response time: `0.04 s`" in execution or "Response time: `0.05 s`" in execution
+    execution, metadata = updates[-1][3], updates[-1][4]
+    assert ">CACHE HIT<" in metadata and ">GROUNDED<" in metadata
+    assert "<b>Latency</b>45 ms" in metadata or "<b>Latency</b>44 ms" in metadata
     assert execution.count("✓") == 1 and "✓ Validated cached answer found" in execution
     assert "Guardrail" not in execution
-    assert "Original prompt tokens: `100`" in execution
+    assert "<b>Tokens (original run)</b>100 in / 20 out" in metadata
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("outcome", "label"),
+    ("outcome", "label", "badge"),
     [
-        ("out_of_scope", "Out of scope"),
-        ("insufficient_evidence", "Insufficient evidence"),
-        ("grounding_failed", "Grounding validation failed"),
-        ("generation_failed", "No validated answer could be produced"),
+        ("out_of_scope", "Out of scope", "OUT OF SCOPE"),
+        ("insufficient_evidence", "Insufficient evidence", "INSUFFICIENT EVIDENCE"),
+        ("grounding_failed", "Grounding validation failed", "NO VALIDATED ANSWER"),
+        ("generation_failed", "No validated answer could be produced", "NO VALIDATED ANSWER"),
     ],
 )
-async def test_agent_semantic_outcomes_show_the_safe_message_without_sources(outcome: str, label: str) -> None:
+async def test_agent_semantic_outcomes_show_the_safe_message_without_sources(
+    outcome: str, label: str, badge: str
+) -> None:
     client = FakeClient(
         (
             SSEEvent("metadata", {"cache_status": "miss"}),
@@ -300,9 +341,11 @@ async def test_agent_semantic_outcomes_show_the_safe_message_without_sources(out
     final = updates[-1]
     assert final[0] == "A fixed safe message."
     assert "No validated sources" in final[1]
-    assert f"**Status:** {label}" in final[2]
+    assert f"Status:</strong> {label}" in final[2]
     assert "Grounding validation passed" not in final[2]
     assert "✓ Checking question scope" in final[3]
+    assert f">{badge}<" in final[4] and "GROUNDED" not in final[4]
+    assert "Tokens" not in final[4] and "Model" not in final[4]
 
 
 @pytest.mark.anyio
@@ -322,6 +365,7 @@ async def test_agent_error_shows_only_the_safe_message_and_no_answer() -> None:
     assert "No validated sources" in final[1]
     assert "took too long" in final[2]
     assert "Traceback" not in "".join(final) and "{" not in final[2]
+    assert ">NO VALIDATED ANSWER<" in final[4] and "GROUNDED" not in final[4]
 
 
 @pytest.mark.parametrize(
@@ -354,11 +398,11 @@ def test_execution_steps_are_bounded_and_untrusted_links_are_not_rendered() -> N
 
     from src.gradio_app import MAX_EXECUTION_STEPS, _render
 
-    answer, sources, _, execution = _render(state)
+    answer, sources, _, execution, _ = _render(state)
 
     assert len(state.steps) == MAX_EXECUTION_STEPS == 60
     assert "<script>" not in execution and "&lt;script&gt;" in execution
-    assert "[PDF](" not in sources and "evil.example" not in sources
+    assert "<a " not in sources and "evil.example" not in sources
     assert answer == "Answer [S1]."
 
 
@@ -421,4 +465,56 @@ def test_main_launches_on_the_configured_binding_without_a_public_share_link(mon
 
     gradio_app.main()
 
-    assert launched == {"server_name": "0.0.0.0", "server_port": 7860, "share": False}
+    assert launched == {
+        "server_name": "0.0.0.0",
+        "server_port": 7860,
+        "share": False,
+        "theme": gradio_app.THEME,
+        "css": gradio_app.CSS,
+    }
+
+
+def test_architecture_image_is_a_packaged_png_inside_the_source_tree() -> None:
+    image = gradio_app.ARCHITECTURE_IMAGE
+
+    assert image.is_file() and image.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    # The Docker image copies only src/, so the asset has to live there to reach the container.
+    assert image.is_relative_to(gradio_app.Path(gradio_app.__file__).parent)
+
+
+def test_architecture_diagram_source_has_current_labels_and_no_stale_ones() -> None:
+    diagram = gradio_app.ARCHITECTURE_IMAGE.with_suffix(".svg").read_text()
+
+    for label in ("BAAI/bge-small-en-v1.5", "rag:agent-response:v1:", "/api/v1/agent/ask/stream", "LangGraph"):
+        assert label in diagram
+    for stale in ("Planned", "bge-large", "CrewAI", "rag:response:v1"):
+        assert stale not in diagram
+
+
+def test_demo_builds_with_a_collapsed_architecture_section_and_the_required_examples() -> None:
+    config = gradio_app.build_demo().get_config_file()
+
+    components = {component["type"]: component for component in config["components"]}
+    assert components["accordion"]["props"]["label"] == "How this system works"
+    assert components["accordion"]["props"]["open"] is False
+    assert "production-agentic-rag-final" in str(components["image"]["props"]["value"])
+    assert len(gradio_app.EXAMPLE_QUESTIONS) == 4
+    assert gradio_app.EXAMPLE_QUESTIONS[0].startswith("What biases were found when auditing open-source")
+    assert "CrewAI" not in gradio_app.HERO_HTML + gradio_app.HOW_IT_WORKS
+
+
+def test_latency_is_shown_in_milliseconds_below_one_second() -> None:
+    assert gradio_app._format_latency(0.0071) == "7 ms"
+    assert gradio_app._format_latency(12.3456) == "12.35 s"
+
+
+def test_metadata_is_empty_until_the_api_returns_something_and_never_shows_placeholder_zeros() -> None:
+    state = DemoState()
+    assert gradio_app._render_metadata(state) == ""
+
+    state.apply(SSEEvent("metadata", {"cache_status": "miss"}))
+
+    metadata = gradio_app._render_metadata(state)
+    assert ">CACHE MISS<" in metadata
+    for absent in ("Latency", "Model", "Sources", "Tokens", "GROUNDED", ">0<"):
+        assert absent not in metadata
