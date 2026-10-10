@@ -1,5 +1,5 @@
 # One Compose project owns the whole stack. Host ports are bound to 127.0.0.1 only;
-# a reverse proxy will later be the single public entry point.
+# host-level Nginx (deploy/nginx/) is the single public entry point, proxying to Gradio.
 name: production-agentic-rag-lab
 
 services:

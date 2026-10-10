@@ -114,6 +114,12 @@ Design notes for each milestone are in `docs/week7-m01-*.md` through
 `docs/week7-m10-agent-api-gradio-acceptance.md`; the stack, ports, and
 autostart are in `docs/week7-m11-compose-stack-autostart.md`.
 
+Host-level Nginx is the only public entry point. It terminates HTTPS for
+<https://agenticrag.hbapps.dedyn.io> and proxies to Gradio on
+`127.0.0.1:7860`; the API and every other service stay private. The config
+and installer are in `deploy/nginx/`, and DNS, certificates, timeouts, and
+troubleshooting are in `docs/week7-m12-nginx-https-reverse-proxy.md`.
+
 ---
 
 ## 🚀 Quick Start
