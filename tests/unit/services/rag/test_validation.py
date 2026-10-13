@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 import pytest
-from src.exceptions import GroundingValidationError
+from src.exceptions import GroundingValidationError, GroundingValidationReason
 from src.services.evidence import EvidenceSource
 from src.services.rag.validation import GroundedAnswerValidator
 
@@ -98,3 +98,22 @@ def test_normal_bracketed_words_and_acronyms_are_not_malformed_citations() -> No
     result = GroundedAnswerValidator().validate("A summary [Summary] from SQL [SQL] [S1].", SOURCES)
 
     assert result.cited_labels == ("[S1]",)
+
+
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        ("Combined [S1, S2].", GroundingValidationReason.MALFORMED_CITATION),
+        ("Range [S1-S2].", GroundingValidationReason.MALFORMED_CITATION),
+        ("Spaced [S 1].", GroundingValidationReason.MALFORMED_CITATION),
+        ("Unsupported [S6].", GroundingValidationReason.UNSUPPORTED_CITATION_LABEL),
+        ("Substantive answer without a citation.", GroundingValidationReason.MISSING_REQUIRED_CITATION),
+    ],
+)
+def test_invalid_answers_expose_only_a_stable_validation_reason(answer, reason) -> None:
+    five_sources = tuple(replace(source("[S1]"), label=f"[S{index}]") for index in range(1, 6))
+
+    with pytest.raises(GroundingValidationError) as caught:
+        GroundedAnswerValidator().validate(answer, five_sources)
+
+    assert caught.value.reason is reason

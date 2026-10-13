@@ -1,5 +1,7 @@
 """Custom exceptions for the Mother-of-AI application."""
 
+from enum import StrEnum
+
 
 class RepositoryException(Exception):
     """Base exception for repository-related errors."""
@@ -62,8 +64,37 @@ class LLMResponseError(LLMException):
     """Exception raised when an LLM provider returns an unusable response."""
 
 
+class GroundingValidationReason(StrEnum):
+    """Stable, content-free reasons a generated answer can fail structural validation."""
+
+    NON_TEXT_ANSWER = "non_text_answer"
+    EMPTY_ANSWER = "empty_answer"
+    MALFORMED_CITATION = "malformed_citation"
+    UNSUPPORTED_CITATION_LABEL = "unsupported_citation_label"
+    MISSING_REQUIRED_CITATION = "missing_required_citation"
+
+
+_SAFE_GROUNDING_VALIDATION_MESSAGES = {
+    GroundingValidationReason.NON_TEXT_ANSWER: "Generated answer was not text",
+    GroundingValidationReason.EMPTY_ANSWER: "Generated answer was empty",
+    GroundingValidationReason.MALFORMED_CITATION: "Generated answer contained malformed citation syntax",
+    GroundingValidationReason.UNSUPPORTED_CITATION_LABEL: "Generated answer contained an unsupported citation label",
+    GroundingValidationReason.MISSING_REQUIRED_CITATION: "Substantive generated answer did not cite supplied evidence",
+}
+
+
 class GroundingValidationError(LLMResponseError):
-    """Exception raised when a generated answer violates the grounding contract."""
+    """A generated answer violated the structural grounding contract."""
+
+    def __init__(self, message: str, *, reason: GroundingValidationReason | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+    @property
+    def safe_message(self) -> str | None:
+        """Return an allowlisted diagnostic, never the caller-provided exception message."""
+
+        return _SAFE_GROUNDING_VALIDATION_MESSAGES.get(self.reason)
 
 
 class IncompleteGenerationError(LLMResponseError):

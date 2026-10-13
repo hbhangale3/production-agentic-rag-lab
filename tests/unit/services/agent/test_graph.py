@@ -1656,6 +1656,21 @@ async def test_structurally_invalid_answer_is_a_generation_failure_not_a_groundi
 
 
 @pytest.mark.anyio
+async def test_structural_validation_failure_logs_safe_reason_and_category(caplog) -> None:
+    answer = "PRIVATE_REJECTED_ANSWER uses malformed labels [S1, S2]."
+    deps, _, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))
+
+    result = await run(deps)
+
+    assert result["error_category"] == AgentErrorCategory.ANSWER_VALIDATION_FAILURE
+    record = next(record for record in caplog.records if hasattr(record, "validation_reason"))
+    assert record.validation_reason == "malformed_citation"
+    assert record.error_category == "answer_validation_failure"
+    assert "Generated answer contained malformed citation syntax" in record.getMessage()
+    assert "PRIVATE_REJECTED_ANSWER" not in caplog.text
+
+
+@pytest.mark.anyio
 async def test_generation_provider_failure_is_controlled() -> None:
     answer = RuntimeError("private generation detail")
     deps, provider, _ = dependencies(llm=FakeLLMProvider('{"score":90}', '{"score":85}', answer=answer))

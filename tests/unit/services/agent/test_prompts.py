@@ -244,6 +244,36 @@ async def test_bundle_resolution_is_fail_open_per_prompt(outcome) -> None:
     assert bundle == local_agent_prompt_bundle()
 
 
+@pytest.mark.anyio
+async def test_managed_generation_prompts_missing_citation_contract_fall_back_locally() -> None:
+    generation = ResolvedPrompt(
+        name="rag-answer-generation",
+        content="Managed prompt without the citation grammar.",
+        version="langfuse-v2",
+        label="production",
+        source="langfuse",
+    )
+    regeneration = ResolvedPrompt(
+        name="rag-answer-regeneration",
+        content="Managed regeneration without the citation grammar.",
+        version="langfuse-v2",
+        label="production",
+        source="langfuse",
+    )
+
+    bundle = await resolve_agent_prompt_bundle(
+        ScriptedResolver(
+            {
+                "rag-answer-generation": generation,
+                "rag-answer-regeneration": regeneration,
+            }
+        )
+    )
+
+    assert bundle.generation == local_prompt(AGENT_PROMPT_DEFINITIONS["generation"])
+    assert bundle.regeneration == local_prompt(AGENT_PROMPT_DEFINITIONS["regeneration"])
+
+
 def test_bundle_rejects_a_prompt_in_the_wrong_slot() -> None:
     local = local_agent_prompt_bundle()
 

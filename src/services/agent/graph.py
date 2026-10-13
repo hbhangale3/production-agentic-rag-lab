@@ -50,9 +50,22 @@ logger = logging.getLogger(__name__)
 
 
 def _log_failure(stage: str, exc: BaseException) -> None:
-    """Record which stage failed and the exception types only; never a message, prompt, or content."""
+    """Record safe failure metadata without prompts, evidence, or generated content."""
 
     cause = type(exc.__cause__).__name__ if exc.__cause__ is not None else None
+    if isinstance(exc, GroundingValidationError) and exc.reason is not None and exc.safe_message is not None:
+        logger.warning(
+            "Agent %s failed: %s (%s, cause=%s)",
+            stage,
+            exc.safe_message,
+            type(exc).__name__,
+            cause,
+            extra={
+                "error_category": AgentErrorCategory.ANSWER_VALIDATION_FAILURE.value,
+                "validation_reason": exc.reason.value,
+            },
+        )
+        return
     logger.warning("Agent %s failed (%s, cause=%s)", stage, type(exc).__name__, cause)
 
 
